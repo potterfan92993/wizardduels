@@ -86,6 +86,7 @@ export function Dashboard() {
 
       // Update Target stats
       if (!next[target.id]) next[target.id] = { userId: target.id, username: target.username, wins: 0, losses: 0, casts: 0 };
+      next[target.id].casts += 1;
       if (winner === "TARGET") next[target.id].wins += 1;
       if (winner === "CASTER") next[target.id].losses += 1;
 
