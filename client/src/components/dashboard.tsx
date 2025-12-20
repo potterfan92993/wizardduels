@@ -32,72 +32,82 @@ export function Dashboard() {
     setLeaderboard(initialLB);
   }, []);
 
-  const simulateRedemption = () => {
-    const caster = getRandomUser();
-    const target = getRandomUser(caster.id);
-    const spell = getRandomSpell();
+const simulateRedemption = async () => {
+  const caster = getRandomUser();
+  const target = getRandomUser(caster.id);
+  const spell = getRandomSpell();
+  const targetReaction = getRandomSpell();
+  const outcome = resolveDuel(spell, targetReaction);
 
-    // In this simplified version, we just determine if the spell "hits" effectively
-    // To make it a "Game", let's say:
-    // Offensive spells always count as a "Win" against the target unless defended (not implemented in simple mode)
-    // For now, let's just log the cast.
-    
-    // BUT the prompt asked for "Winner" logic: Offensive > Support > Defensive > Offensive
-    // So let's simulate the target ALSO casting a random "Reaction" spell to determine the outcome.
-    
-    const targetReaction = getRandomSpell();
-    const outcome = resolveDuel(spell, targetReaction);
-    
-    let winner: "CASTER" | "TARGET" | "DRAW" = "DRAW";
-    let message = "";
+  let winner: "CASTER" | "TARGET" | "DRAW" = "DRAW";
+  let message = "";
 
-    if (outcome === "WIN") {
-      winner = "CASTER";
-      message = `${caster.username}'s ${spell.name} overwhelmed ${target.username}'s ${targetReaction.name}!`;
-    } else if (outcome === "LOSE") {
-      winner = "TARGET";
-      message = `${target.username}'s ${targetReaction.name} countered ${caster.username}'s ${spell.name}!`;
-    } else {
-      message = `Clash! ${spell.name} and ${targetReaction.name} cancel out!`;
-    }
+  if (outcome === "WIN") {
+    winner = "CASTER";
+    message = `${caster.username}'s ${spell.name} overwhelmed ${target.username}'s ${targetReaction.name}!`;
+  } else if (outcome === "LOSE") {
+    winner = "TARGET";
+    message = `${target.username}'s ${targetReaction.name} countered ${caster.username}'s ${spell.name}!`;
+  } else {
+    message = `Clash! ${spell.name} and ${targetReaction.name} cancel out!`;
+  }
 
-    const newEvent: GameEvent = {
-      id: Math.random().toString(36),
-      timestamp: Date.now(),
-      caster,
-      target,
-      casterSpell: spell,
-      targetSpell: targetReaction,
-      message,
-      winner: winner === "CASTER" ? caster : (winner === "TARGET" ? target : undefined)
-    };
-
-    setEvents(prev => [newEvent, ...prev].slice(0, 50));
-    
-    // Update Leaderboard
-    setLeaderboard(prev => {
-      const next = { ...prev };
-      
-      // Update Caster stats
-      if (!next[caster.id]) next[caster.id] = { userId: caster.id, username: caster.username, wins: 0, losses: 0, casts: 0 };
-      next[caster.id].casts += 1;
-      if (winner === "CASTER") next[caster.id].wins += 1;
-      if (winner === "TARGET") next[caster.id].losses += 1;
-
-      // Update Target stats
-      if (!next[target.id]) next[target.id] = { userId: target.id, username: target.username, wins: 0, losses: 0, casts: 0 };
-      next[target.id].casts += 1;
-      if (winner === "TARGET") next[target.id].wins += 1;
-      if (winner === "CASTER") next[target.id].losses += 1;
-
-      return next;
-    });
-
-    // Sync to Overlay
-    localStorage.setItem("last_game_event", JSON.stringify(newEvent));
-    // Trigger storage event manually for same-window testing if needed, though 'storage' event is strictly cross-tab.
-    // In a real app we'd use a BroadcastChannel or WebSocket. 
+  const newEvent: GameEvent = {
+    id: Math.random().toString(36),
+    timestamp: Date.now(),
+    caster,
+    target,
+    casterSpell: spell,
+    targetSpell: targetReaction,
+    message,
+    winner: winner === "CASTER" ? caster : (winner === "TARGET" ? target : undefined)
   };
+
+  setEvents(prev => [newEvent, ...prev].slice(0, 50));
+
+  // Update Leaderboard (local state)
+  setLeaderboard(prev => {
+    const next = { ...prev };
+    if (!next[caster.id]) next[caster.id] = { userId: caster.id, username: caster.username, wins: 0, losses: 0, casts: 0 };
+    next[caster.id].casts += 1;
+    if (winner === "CASTER") next[caster.id].wins += 1;
+    if (winner === "TARGET") next[caster.id].losses += 1;
+
+    if (!next[target.id]) next[target.id] = { userId: target.id, username: target.username, wins: 0, losses: 0, casts: 0 };
+    next[target.id].casts += 1;
+    if (winner === "TARGET") next[target.id].wins += 1;
+    if (winner === "CASTER") next[target.id].losses += 1;
+
+    return next;
+  });
+
+  // Sync to localStorage for overlay
+  localStorage.setItem("last_game_event", JSON.stringify(newEvent));
+
+  // Send to backend for permanent storage
+  try {
+    const apiUrl = import.meta.env.VITE_API_URL || "http://localhost:3000";
+    
+    await fetch(`${apiUrl}/api/events/record`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        caster_id: caster.id,
+        caster_name: caster.username,
+        target_id: target.id,
+        target_name: target.username,
+        caster_spell: spell.name,
+        target_spell: targetReaction.name,
+        winner: winner === "CASTER" ? caster.id : (winner === "TARGET" ? target.id : null),
+        result: winner,
+        message: message,
+      }),
+    });
+    console.log("✓ Duel recorded to backend");
+  } catch (err) {
+    console.error("Failed to record duel to backend:", err);
+  }
+};
 
   const resetGame = () => {
     setEvents([]);
