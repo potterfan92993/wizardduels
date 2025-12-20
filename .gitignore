@@ -1,6 +1,11 @@
-node_modules
-dist
+node_modules/
+.env
+.env.local
+dist/
+build/
 .DS_Store
-server/public
-vite.config.ts.*
-*.tar.gz
+*.log
+.replit
+replit.nix
+.vscode/
+migrations/
