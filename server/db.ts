@@ -8,7 +8,8 @@ console.log("DATABASE_URL env:", connectionString ? "✓ SET" : "✗ NOT SET");
 if (!connectionString) {
   throw new Error("DATABASE_URL environment variable is not set");
 }
-@@ -11,10 +13,21 @@
+
+const client = new pg.Client({
   connectionString: connectionString,
 });
 

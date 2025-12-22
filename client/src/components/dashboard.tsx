@@ -32,12 +32,10 @@ export function Dashboard() {
     setLeaderboard(initialLB);
   }, []);
 
- const simulateRedemption = () => {
+  const simulateRedemption = () => {
     const caster = getRandomUser();
     const target = getRandomUser(caster.id);
     const spell = getRandomSpell();
-
-
 
     // In this simplified version, we just determine if the spell "hits" effectively
     // To make it a "Game", let's say:
@@ -92,12 +90,8 @@ export function Dashboard() {
       if (winner === "TARGET") next[target.id].wins += 1;
       if (winner === "CASTER") next[target.id].losses += 1;
 
-
-
       return next;
     });
-
-
 
     // Sync to Overlay
     localStorage.setItem("last_game_event", JSON.stringify(newEvent));
