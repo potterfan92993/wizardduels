@@ -12,6 +12,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Trophy, Swords, Shield, Zap, History, ExternalLink, Play, RotateCcw } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import bgImage from "@assets/generated_images/dark_arcane_cyberpunk_background_with_neon_runes.png";
+import { apiRequest } from "@/lib/queryClient";
 
 export function Dashboard() {
   const [events, setEvents] = useState<GameEvent[]>([]);
@@ -44,9 +45,15 @@ export function Dashboard() {
     
     // BUT the prompt asked for "Winner" logic: Offensive > Support > Defensive > Offensive
     // So let's simulate the target ALSO casting a random "Reaction" spell to determine the outcome.
+
+    await apiRequest("POST", "/api/events/record", {
+    type: "spell_cast",
+    payload: { spell: selectedSpellName } // whatever your spell variable is
+    });
     
     const targetReaction = getRandomSpell();
     const outcome = resolveDuel(spell, targetReaction);
+
     
     let winner: "CASTER" | "TARGET" | "DRAW" = "DRAW";
     let message = "";
