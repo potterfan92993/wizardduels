@@ -3,6 +3,8 @@ import type { Server } from "http";
 import { db } from "./db";
 import { gameEvents, leaderboard } from "../shared/schema";
 import { eq, desc } from "drizzle-orm";
+import { crypto } from "crypto";
+import { Express, Request, Response } from "express";
 
 export async function registerRoutes(
   httpServer: Server,
