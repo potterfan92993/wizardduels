@@ -108,26 +108,18 @@ app.post("/api/twitch/webhook", async (req, res) => {
         // 2. UPDATE LEADERBOARD (Corrected with user_id)
         if (winnerName !== "Draw") {
           // Determine if the winner is the caster or the target to get the right ID
-          const winnerId = (winnerName === casterName) ? casterId : null; 
+          const winnerId = (winnerName === casterName) ? casterId : targetId; 
         
           // NOTE: If the winner is 'The Host' or someone without an ID, we might skip
-          if (winnerId) {
-            await db.insert(leaderboard)
-              .values({ 
-                user_id: winnerId,    // This was the missing piece!
-                username: winnerName, 
-                wins: 1 
-              })
-              .onConflictDoUpdate({
-                target: [leaderboard.user_id], // Use user_id as the unique check
-                set: { 
-                  username: winnerName,        // Update name in case they changed it
-                  wins: sql`${leaderboard.wins} + 1`,
-                  updated_at: new Date()
-                },
-              });
-          }
-        }
+              if (winnerId) {
+                    await db.insert(leaderboard)
+                      .values({ user_id: winnerId, username: winnerName, wins: 1 })
+                      .onConflictDoUpdate({
+                        target: [leaderboard.user_id],
+                        set: { wins: sql`${leaderboard.wins} + 1` },
+                      });
+                     }
+                    }
 
         // 3. SEND TO TWITCH CHAT (The Bot Voice)
         if (process.env.CHAT_TOKEN) {
