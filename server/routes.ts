@@ -50,6 +50,24 @@ app.post("/api/twitch/webhook", async (req, res) => {
       const casterId = event.user_id;
       const targetName = event.user_input || "The Host";
 
+      let targetId = null;
+
+            // NEW: Lookup the Target's ID from Twitch
+            try {
+              const userLookup = await fetch(`https://api.twitch.tv/helix/users?login=${targetName.replace('@', '')}`, {
+                headers: {
+                  'Client-Id': process.env.TWITCH_CLIENT_ID,
+                  'Authorization': `Bearer q7bg7363r2ifavvam6l1dttu8wlykw` // You'll need an app token here
+                }
+              });
+              const lookupData = await userLookup.json();
+              if (lookupData.data && lookupData.data.length > 0) {
+                targetId = lookupData.data[0].id;
+              }
+            } catch (e) {
+              console.error("Twitch User Lookup failed", e);
+            }
+
       // AUTO-ROLL: Pick random spells
       const casterSpell = SPELLS[Math.floor(Math.random() * SPELLS.length)];
       const targetSpell = SPELLS[Math.floor(Math.random() * SPELLS.length)];
