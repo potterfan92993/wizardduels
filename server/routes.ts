@@ -28,57 +28,94 @@ export async function registerRoutes(
   app: Express
 ): Promise<Server> {
   
-  // ============ TWITCH WEBHOOK (AUTO-ROLL DUELS) ============
-  app.post("/api/twitch/webhook", async (req, res) => {
-    if (!verifyTwitchSignature(req)) {
-      return res.status(403).send("Forbidden");
-    }
+// ============ TWITCH WEBHOOK (AUTO-ROLL DUELS) ============
+app.post("/api/twitch/webhook", async (req, res) => {
+  if (!verifyTwitchSignature(req)) {
+    return res.status(403).send("Forbidden");
+  }
 
-    const messageType = req.headers["twitch-eventsub-message-type"];
+  const messageType = req.headers["twitch-eventsub-message-type"];
 
-    // Handle Twitch Verification Challenge
-    if (messageType === "webhook_callback_verification") {
-      return res.status(200).send(req.body.challenge);
-    }
+  // Handle Twitch Verification Challenge
+  if (messageType === "webhook_callback_verification") {
+    return res.status(200).send(req.body.challenge);
+  }
 
-    // Handle Actual Redemption
-    if (messageType === "notification") {
-      const event = req.body.event;
+  // Handle Actual Redemption
+  if (messageType === "notification") {
+    const event = req.body.event;
 
-      if (event.reward?.title === "Wizard Duel!") {
-        const casterName = event.user_name;
-        const casterId = event.user_id;
-        const targetName = event.user_input || "The Host";
+    if (event.reward?.title === "Wizard Duel!") {
+      const casterName = event.user_name;
+      const casterId = event.user_id;
+      const targetName = event.user_input || "The Host";
 
-        // AUTO-ROLL: Pick random spells for both
-        const casterSpell = SPELLS[Math.floor(Math.random() * SPELLS.length)];
-        const targetSpell = SPELLS[Math.floor(Math.random() * SPELLS.length)];
+      // AUTO-ROLL: Pick random spells
+      const casterSpell = SPELLS[Math.floor(Math.random() * SPELLS.length)];
+      const targetSpell = SPELLS[Math.floor(Math.random() * SPELLS.length)];
 
-        // Determine Winner
-        const outcome = resolveDuel(casterSpell, targetSpell);
-        let winnerName = outcome === "WIN" ? casterName : (outcome === "LOSE" ? targetName : "Draw");
-        let resultStatus = outcome === "WIN" ? "VICTORY" : (outcome === "LOSE" ? "DEFEAT" : "DRAW");
+      // Determine Winner
+      const outcome = resolveDuel(casterSpell, targetSpell);
+      let winnerName = outcome === "WIN" ? casterName : (outcome === "LOSE" ? targetName : "Draw");
+      let resultStatus = outcome === "WIN" ? "VICTORY" : (outcome === "LOSE" ? "DEFEAT" : "DRAW");
 
-        // Record Duel to Database
-        try {
-          await db.insert(gameEvents).values({
-            caster_id: casterId,
-            caster_name: casterName,
-            target_name: targetName,
-            caster_spell: casterSpell.name,
-            target_spell: targetSpell.name,
-            winner: winnerName,
-            result: resultStatus,
-            message: `${casterName} used ${casterSpell.name} vs ${targetName}'s ${targetSpell.name}!`,
-          });
-          console.log(`Duel Recorded: ${casterName} vs ${targetName}`);
-        } catch (err) {
-          console.error("Failed to auto-record Twitch duel:", err);
+      // Record Duel to Database
+      try {
+        // 1. Record the Duel Log (Working)
+        await db.insert(gameEvents).values({
+          caster_id: casterId,
+          caster_name: casterName,
+          target_name: targetName,
+          caster_spell: casterSpell.name,
+          target_spell: targetSpell.name,
+          winner: winnerName,
+          result: resultStatus,
+          message: `${casterName} used ${casterSpell.name} vs ${targetName}'s ${targetSpell.name}!`,
+        });
+
+        // 2. UPDATE LEADERBOARD (The missing link)
+        if (winnerName !== "Draw") {
+          // This uses "Upsert" logic: Update if exists, Insert if new
+          await db.insert(leaderboard) 
+            .values({ 
+              username: winnerName, 
+              wins: 1 
+            })
+            .onConflictDoUpdate({
+              target: [leaderboard.username],
+              set: { wins: sql`${leaderboard.wins} + 1` },
+            });
         }
+
+        // 3. SEND TO TWITCH CHAT (The Bot Voice)
+        if (process.env.CHAT_TOKEN) {
+          try {
+            await fetch('https://api.twitch.tv/helix/chat/messages', {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${process.env.CHAT_TOKEN}`,
+                'Client-Id': process.env.TWITCH_CLIENT_ID,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                broadcaster_id: process.env.BROADCASTER_ID,
+                sender_id: process.env.BROADCASTER_ID, // Bots can be the streamer
+                message: `🧙‍♂️ ${casterName} vs ${targetName}! ${winnerName === "Draw" ? "It's a Draw!" : winnerName + " WINS!"} ✨`
+              })
+            });
+          } catch (chatErr) {
+            console.error("Chat message failed:", chatErr);
+          }
+        }
+
+        console.log(`Duel Recorded and Leaderboard Updated: ${casterName} vs ${targetName}`);
+      } catch (err) {
+        console.error("Failed to process duel results:", err);
       }
     }
-    return res.status(204).send();
-  });
+  }
+  return res.status(204).send();
+});
 
   // ============ LEADERBOARD OVERLAY ROUTE ============
   app.get("/api/leaderboard", async (req, res) => {
