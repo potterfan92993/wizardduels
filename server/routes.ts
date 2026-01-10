@@ -48,7 +48,10 @@ app.post("/api/twitch/webhook", async (req, res) => {
     if (event.reward?.title === "Wizard Duel!") {
       const casterName = event.user_name;
       const casterId = event.user_id;
-      const targetName = event.user_input || "The Host";
+      
+      //Extract and Clean Target Name
+      let rawInput = event.user_input || "";
+      const targetName = rawInput.replace(/@/g, "").trim().split(/\s+/)[0] || "The Host";
 
       // AUTO-ROLL: Pick random spells
       const casterSpell = SPELLS[Math.floor(Math.random() * SPELLS.length)];
