@@ -73,18 +73,28 @@ app.post("/api/twitch/webhook", async (req, res) => {
           message: `${casterName} used ${casterSpell.name} vs ${targetName}'s ${targetSpell.name}!`,
         });
 
-        // 2. UPDATE LEADERBOARD (The missing link)
+        // 2. UPDATE LEADERBOARD (Corrected with user_id)
         if (winnerName !== "Draw") {
-          // This uses "Upsert" logic: Update if exists, Insert if new
-          await db.insert(leaderboard) 
-            .values({ 
-              username: winnerName, 
-              wins: 1 
-            })
-            .onConflictDoUpdate({
-              target: [leaderboard.username],
-              set: { wins: sql`${leaderboard.wins} + 1` },
-            });
+          // Determine if the winner is the caster or the target to get the right ID
+          const winnerId = (winnerName === casterName) ? casterId : null; 
+        
+          // NOTE: If the winner is 'The Host' or someone without an ID, we might skip
+          if (winnerId) {
+            await db.insert(leaderboard)
+              .values({ 
+                user_id: winnerId,    // This was the missing piece!
+                username: winnerName, 
+                wins: 1 
+              })
+              .onConflictDoUpdate({
+                target: [leaderboard.user_id], // Use user_id as the unique check
+                set: { 
+                  username: winnerName,        // Update name in case they changed it
+                  wins: sql`${leaderboard.wins} + 1`,
+                  updated_at: new Date()
+                },
+              });
+          }
         }
 
         // 3. SEND TO TWITCH CHAT (The Bot Voice)
