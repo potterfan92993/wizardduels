@@ -5,7 +5,6 @@ export interface Spell {
   name: string;
   type: SpellType;
   description: string;
-  // We removed the Icon here because the server can't "see" icons
   color: string;
 }
 
