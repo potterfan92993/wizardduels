@@ -11,11 +11,6 @@ export interface Spell {
   color: string;
 }
 
-export interface User {
-  id: string;
-  username: string;
-  avatarUrl?: string;
-}
 
 export interface GameEvent {
   id: string;
@@ -28,13 +23,6 @@ export interface GameEvent {
   message: string;
 }
 
-export interface LeaderboardEntry {
-  userId: string;
-  username: string;
-  wins: number;
-  losses: number;
-  casts: number;
-}
 
 export function getRandomSpell(): Spell {
   return SPELLS[Math.floor(Math.random() * SPELLS.length)];
