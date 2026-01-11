@@ -1,7 +1,7 @@
 import type { Express, Request } from "express";
 import type { Server } from "http";
 import { db } from "./db";
-import { gameEvents, leaderboard } from "../shared/schema";
+import { gameEvents } from "../shared/schema";
 import { eq, desc } from "drizzle-orm";
 import crypto from "crypto";
 import { SPELLS, resolveDuel } from "../shared/game-logic";
