@@ -73,14 +73,27 @@ app.post("/api/twitch/webhook", async (req, res) => {
       let rawInput = event.user_input || "";
       const targetName = rawInput.replace(/@/g, "").trim().split(/\s+/)[0] || "The Host";
 
+      let isAutoDuel = false;
+
+      // If the target is "The Host" or the lookup failed/was skipped
+      if (!targetId || targetName === "The Host") {
+        isAutoDuel = true;
+      };
+
       // AUTO-ROLL: Pick random spells
       const casterSpell = SPELLS[Math.floor(Math.random() * SPELLS.length)];
       const targetSpell = SPELLS[Math.floor(Math.random() * SPELLS.length)];
 
       // Determine Winner
-      const outcome = resolveDuel(casterSpell, targetSpell);
-      let winnerName = outcome === "WIN" ? casterName : (outcome === "LOSE" ? targetName : "Draw");
-      let resultStatus = outcome === "WIN" ? "VICTORY" : (outcome === "LOSE" ? "DEFEAT" : "DRAW");
+      const outcome = resolveDuel(casterSpell, targetSpell)
+      
+      if (isAutoDuel) {
+         let winnerName = casterName; // Forces the leaderboard to ignore this
+         let resultStatus = "DRAW";
+          } else {
+          let winnerName = outcome === "WIN" ? casterName : (outcome === "LOSE" ? targetName : "Draw");
+          let resultStatus = outcome === "WIN" ? "VICTORY" : (outcome === "LOSE" ? "DEFEAT" : "DRAW");
+            };
 
       // Record Duel to Database
       try {
@@ -125,25 +138,6 @@ app.post("/api/twitch/webhook", async (req, res) => {
   }
   return res.status(204).send();
 });
-
-  // ============ LEADERBOARD OVERLAY ROUTE ============
-  app.get("/api/leaderboard", async (req, res) => {
-    try {
-      const data = await db
-        .select({
-          username: leaderboard.username,
-          wins: leaderboard.wins,
-          losses: leaderboard.losses,
-          casts: leaderboard.casts,
-        })
-        .from(leaderboard)
-        .orderBy(desc(leaderboard.wins))
-        .limit(10);
-      res.json(data);
-    } catch (err) {
-      res.status(500).json({ error: "Failed to fetch leaderboard" });
-    }
-  });
 
   // ============ LATEST EVENT ROUTE ============
   app.get("/api/events/latest", async (req, res) => {
