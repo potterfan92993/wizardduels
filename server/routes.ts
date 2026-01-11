@@ -76,9 +76,9 @@ app.post("/api/twitch/webhook", async (req, res) => {
       let isAutoDuel = false;
 
       // If the target is "The Host" or the lookup failed/was skipped
-      //if (!targetId || targetName === "The Host" || casterName) {
-        //isAutoDuel = true;
-      //};
+      if (!targetId || targetName === "The Host") {
+        isAutoDuel = true
+      };
 
       // AUTO-ROLL: Pick random spells
       const casterSpell = SPELLS[Math.floor(Math.random() * SPELLS.length)];
@@ -86,14 +86,20 @@ app.post("/api/twitch/webhook", async (req, res) => {
 
       // Determine Winner
       const outcome = resolveDuel(casterSpell, targetSpell)
+
+      // Result 
+      let winnerName = "";
+      let resultStatus = "";
       
-    //  if (isAutoDuel) {
-        // let winnerName = casterName; // Forces the leaderboard to ignore this
-        // let resultStatus = "DRAW";
-         // } else {
-          let winnerName = outcome === "WIN" ? casterName : (outcome === "LOSE" ? targetName : "Draw");
-          let resultStatus = outcome === "WIN" ? "VICTORY" : (outcome === "LOSE" ? "DEFEAT" : "DRAW");
-            //};
+      if (isAutoDuel) {
+        // To ignore for "winnings sake", we set winner to Draw
+        winnerName = "Draw"; 
+        resultStatus = "AUTO_PRACTICE";
+      } else {
+        // Standard duel logic
+        winnerName = outcome === "WIN" ? casterName : (outcome === "LOSE" ? targetName : "Draw");
+        resultStatus = outcome === "WIN" ? "VICTORY" : (outcome === "LOSE" ? "DEFEAT" : "DRAW");
+      };
 
       // Record Duel to Database
       try {
