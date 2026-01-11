@@ -6,6 +6,26 @@ import { eq, desc } from "drizzle-orm";
 import crypto from "crypto";
 import { SPELLS, resolveDuel } from "../shared/game-logic";
 
+async function getAppAccessToken() {
+  const response = await fetch('https://id.twitch.tv/oauth2/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: process.env.TWITCH_CLIENT_ID,
+      client_secret: process.env.TWITCH_CLIENT_SECRET, // Make sure this is in Render!
+      grant_type: 'client_credentials'
+    })
+  });
+  
+  if (!response.ok) {
+    const errorData = await response.json();
+    throw new Error(`Twitch Auth Failed: ${JSON.stringify(errorData)}`);
+  }
+
+  const data = await response.json();
+  return data.access_token;
+};
+
 // Security Guard: Verifies the message is actually from Twitch
 const verifyTwitchSignature = (req: Request) => {
   const secret = process.env.TWITCH_WEBHOOK_SECRET;
