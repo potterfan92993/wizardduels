@@ -1,22 +1,34 @@
 import type { Express, Request } from "express";
 import type { Server } from "http";
+import { WebSocketServer } from "ws";
 import { db } from "./db";
 import { gameEvents } from "../shared/schema";
-import { eq, desc } from "drizzle-orm";
+import { eq, desc, sql } from "drizzle-orm";
 import crypto from "crypto";
 import { SPELLS, resolveDuel } from "../shared/game-logic";
 
-async function getAppAccessToken() {
-  const response = await fetch('https://id.twitch.tv/oauth2/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      client_id: process.env.TWITCH_CLIENT_ID,
-      client_secret: process.env.TWITCH_CLIENT_SECRET, // Make sure this is in Render!
-      grant_type: 'client_credentials'
-    })
+// ============ WEBSOCKET SETUP ============
+const clients = new Set<any>();
+
+function broadcast(data: object) {
+  const msg = JSON.stringify(data);
+  clients.forEach((ws) => {
+    if (ws.readyState === 1) ws.send(msg);
   });
-  
+}
+
+// ============ TWITCH HELPERS ============
+async function getAppAccessToken() {
+  const response = await fetch("https://id.twitch.tv/oauth2/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: process.env.TWITCH_CLIENT_ID!,
+      client_secret: process.env.TWITCH_CLIENT_SECRET!,
+      grant_type: "client_credentials",
+    }),
+  });
+
   if (!response.ok) {
     const errorData = await response.json();
     throw new Error(`Twitch Auth Failed: ${JSON.stringify(errorData)}`);
@@ -24,10 +36,10 @@ async function getAppAccessToken() {
 
   const data = await response.json();
   return data.access_token;
-};
+}
 
-// Security Guard: Verifies the message is actually from Twitch
-const verifyTwitchSignature = (req: Request) => {
+// Verifies the message is actually from Twitch
+const verifyTwitchSignature = (req: Request): boolean => {
   const secret = process.env.TWITCH_WEBHOOK_SECRET;
   const messageId = req.headers["twitch-eventsub-message-id"];
   const timestamp = req.headers["twitch-eventsub-message-timestamp"];
@@ -35,9 +47,14 @@ const verifyTwitchSignature = (req: Request) => {
 
   if (!secret || !messageId || !timestamp || !signature) return false;
 
+  // FIX: Use raw body bytes, not re-serialized JSON
   const hmac = crypto
     .createHmac("sha256", secret)
-    .update((messageId as string) + (timestamp as string) + JSON.stringify(req.body))
+    .update(
+      (messageId as string) +
+        (timestamp as string) +
+        (req.rawBody as Buffer).toString()
+    )
     .digest("hex");
 
   return `sha256=${hmac}` === signature;
@@ -47,105 +64,173 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
-  
-// ============ TWITCH WEBHOOK (AUTO-ROLL DUELS) ============
-app.post("/api/twitch/webhook", async (req, res) => {
-  if (!verifyTwitchSignature(req)) {
-    return res.status(403).send("Forbidden");
-  }
 
-  const messageType = req.headers["twitch-eventsub-message-type"];
+  // ============ WEBSOCKET SERVER ============
+  const wss = new WebSocketServer({ server: httpServer });
+  wss.on("connection", (ws) => {
+    clients.add(ws);
+    ws.on("close", () => clients.delete(ws));
+  });
 
-  // Handle Twitch Verification Challenge
-  if (messageType === "webhook_callback_verification") {
-    return res.status(200).send(req.body.challenge);
-  }
+  // ============ TWITCH WEBHOOK ============
+  app.post("/api/twitch/webhook", async (req, res) => {
+    if (!verifyTwitchSignature(req)) {
+      return res.status(403).send("Forbidden");
+    }
 
-  // Handle Actual Redemption
-  if (messageType === "notification") {
-    const event = req.body.event;
+    const messageType = req.headers["twitch-eventsub-message-type"];
 
-    if (event.reward?.title === "Wizard Duel!") {
-      const casterName = event.user_name;
-      const casterId = event.user_id;
-      
-      //Extract and Clean Target Name
-      let rawInput = event.user_input || "";
-      const targetName = rawInput.replace(/@/g, "").trim().split(/\s+/)[0] || "The Host";
+    if (messageType === "webhook_callback_verification") {
+      return res.status(200).send(req.body.challenge);
+    }
 
-      let isAutoDuel = false;
+    if (messageType === "notification") {
+      const event = req.body.event;
 
-      // If the target is "The Host" or the lookup failed/was skipped
-      if (!targetId || targetName === "The Host") {
-        isAutoDuel = true
-      };
+      if (event.reward?.title === "Wizard Duel!") {
+        const casterName: string = event.user_name;
+        const casterId: string = event.user_id;
 
-      // AUTO-ROLL: Pick random spells
-      const casterSpell = SPELLS[Math.floor(Math.random() * SPELLS.length)];
-      const targetSpell = SPELLS[Math.floor(Math.random() * SPELLS.length)];
+        const rawInput: string = event.user_input || "";
+        const targetName: string =
+          rawInput.replace(/@/g, "").trim().split(/\s+/)[0] || "The Host";
 
-      // Determine Winner
-      const outcome = resolveDuel(casterSpell, targetSpell)
+        // FIX: declare targetId (future: lookup via Twitch API)
+        let targetId: string | null = null;
 
-      // Result 
-      let winnerName = "";
-      let resultStatus = "";
-      
-      if (isAutoDuel) {
-        // To ignore for "winnings sake", we set winner to Draw
-        winnerName = "Draw"; 
-        resultStatus = "AUTO_PRACTICE";
-      } else {
-        // Standard duel logic
-        winnerName = outcome === "WIN" ? casterName : (outcome === "LOSE" ? targetName : "Draw");
-        resultStatus = outcome === "WIN" ? "VICTORY" : (outcome === "LOSE" ? "DEFEAT" : "DRAW");
-      };
+        const isAutoDuel = !targetId || targetName === "The Host";
 
-      // Record Duel to Database
-      try {
-        // 1. Record the Duel Log (Working)
-        await db.insert(gameEvents).values({
-          caster_id: casterId,
-          caster_name: casterName,
-          target_name: targetName,
-          caster_spell: casterSpell.name,
-          target_spell: targetSpell.name,
-          winner: winnerName,
-          result: resultStatus,
-          message: `${casterName} used ${casterSpell.name} vs ${targetName}'s ${targetSpell.name}!`,
-        });
+        const casterSpell = SPELLS[Math.floor(Math.random() * SPELLS.length)];
+        const targetSpell = SPELLS[Math.floor(Math.random() * SPELLS.length)];
 
-        // 3. SEND TO TWITCH CHAT (The Bot Voice)
-        if (process.env.CHAT_TOKEN) {
-          try {
-            await fetch('https://api.twitch.tv/helix/chat/messages', {
-              method: 'POST',
-              headers: {
-                'Authorization': `Bearer ${process.env.CHAT_TOKEN}`,
-                'Client-Id': process.env.TWITCH_CLIENT_ID,
-                'Content-Type': 'application/json'
-              },
-              body: JSON.stringify({
-                broadcaster_id: process.env.BROADCASTER_ID,
-                sender_id: process.env.BROADCASTER_ID, // Bots can be the streamer
-                message: `🧙‍♂️ ${casterName} vs ${targetName}! ${winnerName === "Draw" ? "It's a Draw!" : winnerName + " WINS!"} ✨`
-              })
-            });
-          } catch (chatErr) {
-            console.error("Chat message failed:", chatErr);
-          }
+        const outcome = resolveDuel(casterSpell, targetSpell);
+
+        let winnerName: string;
+        let resultStatus: string;
+
+        if (isAutoDuel) {
+          winnerName = "Draw";
+          resultStatus = "AUTO_PRACTICE";
+        } else {
+          winnerName =
+            outcome === "WIN"
+              ? casterName
+              : outcome === "LOSE"
+              ? targetName
+              : "Draw";
+          resultStatus =
+            outcome === "WIN"
+              ? "VICTORY"
+              : outcome === "LOSE"
+              ? "DEFEAT"
+              : "DRAW";
         }
 
-        console.log(`Duel Recorded and Leaderboard Updated: ${casterName} vs ${targetName}`);
-      } catch (err) {
-        console.error("Failed to process duel results:", err);
+        const duelMessage = `${casterName} used ${casterSpell.name} vs ${targetName}'s ${targetSpell.name}!`;
+
+        try {
+          await db.insert(gameEvents).values({
+            caster_id: casterId,
+            caster_name: casterName,
+            target_id: targetId,
+            target_name: targetName,
+            caster_spell: casterSpell.name,
+            target_spell: targetSpell.name,
+            winner: winnerName,
+            result: resultStatus,
+            message: duelMessage,
+          });
+
+          // Broadcast to WebSocket clients (overlay + dashboard)
+          broadcast({
+            type: "DUEL_RESULT",
+            casterName,
+            targetName,
+            casterSpell: casterSpell.name,
+            casterSpellType: casterSpell.type,
+            casterSpellColor: casterSpell.color,
+            targetSpell: targetSpell.name,
+            targetSpellType: targetSpell.type,
+            winner: winnerName,
+            result: resultStatus,
+            message: duelMessage,
+          });
+
+          // Send to Twitch chat
+          if (process.env.CHAT_TOKEN) {
+            try {
+              const chatMessage =
+                winnerName === "Draw"
+                  ? `🧙‍♂️ ${casterName} vs ${targetName}! It's a Draw! ✨`
+                  : `🧙‍♂️ ${casterName} vs ${targetName}! ${winnerName} WINS with ${
+                      outcome === "WIN" ? casterSpell.name : targetSpell.name
+                    }! ✨`;
+
+              await fetch("https://api.twitch.tv/helix/chat/messages", {
+                method: "POST",
+                headers: {
+                  Authorization: `Bearer ${process.env.CHAT_TOKEN}`,
+                  "Client-Id": process.env.TWITCH_CLIENT_ID!,
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                  broadcaster_id: process.env.BROADCASTER_ID,
+                  sender_id: process.env.BROADCASTER_ID,
+                  message: chatMessage,
+                }),
+              });
+            } catch (chatErr) {
+              console.error("Chat message failed:", chatErr);
+            }
+          }
+
+          console.log(`Duel recorded: ${casterName} vs ${targetName} → ${winnerName} wins`);
+        } catch (err) {
+          console.error("Failed to process duel results:", err);
+        }
       }
     }
-  }
-  return res.status(204).send();
-});
 
-  // ============ LATEST EVENT ROUTE ============
+    return res.status(204).send();
+  });
+
+  // ============ LEADERBOARD ============
+  app.get("/api/leaderboard", async (req, res) => {
+    try {
+      const result = await db
+        .select({
+          username: gameEvents.caster_name,
+          wins: sql<number>`count(*)`.mapWith(Number),
+        })
+        .from(gameEvents)
+        .where(eq(gameEvents.winner, gameEvents.caster_name))
+        .groupBy(gameEvents.caster_name)
+        .orderBy(desc(sql`count(*)`))
+        .limit(10);
+
+      res.json(result);
+    } catch (err) {
+      console.error("Leaderboard fetch failed:", err);
+      res.status(500).json({ error: "Failed to fetch leaderboard" });
+    }
+  });
+
+  // ============ RECENT EVENTS ============
+  app.get("/api/events/recent", async (req, res) => {
+    try {
+      const result = await db
+        .select()
+        .from(gameEvents)
+        .orderBy(desc(gameEvents.created_at))
+        .limit(10);
+      res.json(result);
+    } catch (err) {
+      console.error("Recent events fetch failed:", err);
+      res.status(500).json({ error: "Failed to fetch recent events" });
+    }
+  });
+
+  // ============ LATEST EVENT ============
   app.get("/api/events/latest", async (req, res) => {
     try {
       const result = await db
@@ -166,3 +251,4 @@ app.post("/api/twitch/webhook", async (req, res) => {
 
   return httpServer;
 }
+
