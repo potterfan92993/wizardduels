@@ -34,32 +34,61 @@ function resultColor(result: string): string {
 
 export function OverlayDisplay() {
   const [currentDuel, setCurrentDuel] = useState<DuelResult | null>(null);
+  const [connected, setConnected] = useState(false);
 
   useEffect(() => {
-    // FIX: Use WebSocket instead of localStorage — works in OBS browser sources
-    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(`${protocol}://${window.location.host}`);
+    let ws: WebSocket;
+    let reconnectTimer: ReturnType<typeof setTimeout>;
 
-    ws.onmessage = (e) => {
-      try {
-        const data = JSON.parse(e.data);
-        if (data.type === "DUEL_RESULT") {
-          setCurrentDuel(data);
-          // Auto-clear after 8 seconds
-          setTimeout(() => setCurrentDuel(null), 8000);
+    const connect = () => {
+      const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+      ws = new WebSocket(`${protocol}://${window.location.host}`);
+
+      ws.onopen = () => {
+        console.log("WebSocket connected");
+        setConnected(true);
+      };
+
+      ws.onmessage = (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          if (data.type === "DUEL_RESULT") {
+            setCurrentDuel(data);
+            // Auto-clear after 8 seconds
+            setTimeout(() => setCurrentDuel(null), 8000);
+          }
+        } catch (err) {
+          console.error("WS parse error:", err);
         }
-      } catch (err) {
-        console.error("WS message parse error:", err);
-      }
+      };
+
+      ws.onerror = (err) => {
+        console.error("WebSocket error:", err);
+        setConnected(false);
+      };
+
+      // Auto-reconnect after 3 seconds if connection drops
+      ws.onclose = () => {
+        console.log("WebSocket closed, reconnecting in 3s...");
+        setConnected(false);
+        reconnectTimer = setTimeout(connect, 3000);
+      };
     };
 
-    ws.onerror = (err) => console.error("WebSocket error:", err);
+    connect();
 
-    return () => ws.close();
+    return () => {
+      clearTimeout(reconnectTimer);
+      ws?.close();
+    };
   }, []);
 
   return (
     <div className="w-full h-screen flex items-center justify-center bg-transparent pointer-events-none overflow-hidden">
+
+      {/* Small connection indicator - green = connected, red = reconnecting */}
+      <div className={`fixed top-2 right-2 w-2 h-2 rounded-full ${connected ? "bg-green-500" : "bg-red-500"}`} />
+
       <AnimatePresence>
         {currentDuel && (
           <motion.div
