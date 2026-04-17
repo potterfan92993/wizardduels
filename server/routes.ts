@@ -6,6 +6,7 @@ import { gameEvents } from "../shared/schema";
 import { eq, desc, sql } from "drizzle-orm";
 import crypto from "crypto";
 import { SPELLS, resolveDuel } from "../shared/game-logic";
+import { log } from "./index";
 
 // ============ WEBSOCKET SETUP ============
 const clients = new Set<any>();
@@ -18,7 +19,9 @@ function broadcast(data: object) {
 }
 
 // ============ TWITCH HELPERS ============
-async function getAppAccessToken() {
+
+// Gets a fresh app access token using Client Credentials
+async function getAppAccessToken(): Promise<string> {
   const response = await fetch("https://id.twitch.tv/oauth2/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -38,6 +41,75 @@ async function getAppAccessToken() {
   return data.access_token;
 }
 
+// Automatically registers the EventSub subscription on startup
+// Checks if it already exists first to avoid duplicates
+async function ensureEventSubSubscription() {
+  try {
+    log("Checking Twitch EventSub subscription...", "twitch");
+
+    const token = await getAppAccessToken();
+
+    const headers = {
+      "Client-ID": process.env.TWITCH_CLIENT_ID!,
+      "Authorization": `Bearer ${token}`,
+      "Content-Type": "application/json",
+    };
+
+    // Check if subscription already exists and is enabled
+    const checkRes = await fetch(
+      "https://api.twitch.tv/helix/eventsub/subscriptions?status=enabled",
+      { headers }
+    );
+    const checkData = await checkRes.json();
+
+    const existing = checkData.data?.find(
+      (sub: any) =>
+        sub.type === "channel.channel_points_custom_reward_redemption.add" &&
+        sub.condition?.broadcaster_user_id === process.env.BROADCASTER_ID &&
+        sub.transport?.callback ===
+          `${process.env.RENDER_EXTERNAL_URL}/api/twitch/webhook`
+    );
+
+    if (existing) {
+      log(`EventSub already active (id: ${existing.id})`, "twitch");
+      return;
+    }
+
+    // Subscription not found — create it
+    log("Registering new EventSub subscription...", "twitch");
+
+    const createRes = await fetch(
+      "https://api.twitch.tv/helix/eventsub/subscriptions",
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          type: "channel.channel_points_custom_reward_redemption.add",
+          version: "1",
+          condition: {
+            broadcaster_user_id: process.env.BROADCASTER_ID,
+          },
+          transport: {
+            method: "webhook",
+            callback: `${process.env.RENDER_EXTERNAL_URL}/api/twitch/webhook`,
+            secret: process.env.TWITCH_WEBHOOK_SECRET,
+          },
+        }),
+      }
+    );
+
+    const createData = await createRes.json();
+
+    if (!createRes.ok) {
+      log(`EventSub registration failed: ${JSON.stringify(createData)}`, "twitch");
+    } else {
+      log(`EventSub registered successfully (id: ${createData.data?.[0]?.id})`, "twitch");
+    }
+  } catch (err) {
+    log(`EventSub setup error: ${err}`, "twitch");
+  }
+}
+
 // Verifies the message is actually from Twitch
 const verifyTwitchSignature = (req: Request): boolean => {
   const secret = process.env.TWITCH_WEBHOOK_SECRET;
@@ -47,7 +119,7 @@ const verifyTwitchSignature = (req: Request): boolean => {
 
   if (!secret || !messageId || !timestamp || !signature) return false;
 
-  // FIX: Use raw body bytes, not re-serialized JSON
+  // Use raw body bytes, not re-serialized JSON
   const hmac = crypto
     .createHmac("sha256", secret)
     .update(
@@ -72,6 +144,11 @@ export async function registerRoutes(
     ws.on("close", () => clients.delete(ws));
   });
 
+  // ============ AUTO-REGISTER EVENTSUB ON STARTUP ============
+  // Waits 3s to ensure the server is fully listening before
+  // Twitch tries to verify the callback URL
+  setTimeout(ensureEventSubSubscription, 3000);
+
   // ============ TWITCH WEBHOOK ============
   app.post("/api/twitch/webhook", async (req, res) => {
     if (!verifyTwitchSignature(req)) {
@@ -80,10 +157,13 @@ export async function registerRoutes(
 
     const messageType = req.headers["twitch-eventsub-message-type"];
 
+    // Handle Twitch verification challenge
     if (messageType === "webhook_callback_verification") {
+      log("Twitch webhook verified successfully", "twitch");
       return res.status(200).send(req.body.challenge);
     }
 
+    // Handle actual redemption
     if (messageType === "notification") {
       const event = req.body.event;
 
@@ -91,18 +171,21 @@ export async function registerRoutes(
         const casterName: string = event.user_name;
         const casterId: string = event.user_id;
 
+        // Extract and clean target name
         const rawInput: string = event.user_input || "";
         const targetName: string =
           rawInput.replace(/@/g, "").trim().split(/\s+/)[0] || "The Host";
 
-        // FIX: declare targetId (future: lookup via Twitch API)
+        // targetId: null until Twitch API lookup is added in future
         let targetId: string | null = null;
 
         const isAutoDuel = !targetId || targetName === "The Host";
 
+        // Roll random spells for both sides
         const casterSpell = SPELLS[Math.floor(Math.random() * SPELLS.length)];
         const targetSpell = SPELLS[Math.floor(Math.random() * SPELLS.length)];
 
+        // Determine winner
         const outcome = resolveDuel(casterSpell, targetSpell);
 
         let winnerName: string;
@@ -129,6 +212,7 @@ export async function registerRoutes(
         const duelMessage = `${casterName} used ${casterSpell.name} vs ${targetName}'s ${targetSpell.name}!`;
 
         try {
+          // Record duel to database
           await db.insert(gameEvents).values({
             caster_id: casterId,
             caster_name: casterName,
@@ -156,7 +240,7 @@ export async function registerRoutes(
             message: duelMessage,
           });
 
-          // Send to Twitch chat
+          // Send result to Twitch chat
           if (process.env.CHAT_TOKEN) {
             try {
               const chatMessage =
@@ -184,7 +268,7 @@ export async function registerRoutes(
             }
           }
 
-          console.log(`Duel recorded: ${casterName} vs ${targetName} → ${winnerName} wins`);
+          log(`Duel recorded: ${casterName} vs ${targetName} → ${winnerName} wins`, "twitch");
         } catch (err) {
           console.error("Failed to process duel results:", err);
         }
@@ -194,7 +278,7 @@ export async function registerRoutes(
     return res.status(204).send();
   });
 
-  // ============ LEADERBOARD ============
+  // ============ LEADERBOARD (top 10 winners) ============
   app.get("/api/leaderboard", async (req, res) => {
     try {
       const result = await db
@@ -215,7 +299,7 @@ export async function registerRoutes(
     }
   });
 
-  // ============ RECENT EVENTS ============
+  // ============ RECENT EVENTS (last 10 duels) ============
   app.get("/api/events/recent", async (req, res) => {
     try {
       const result = await db
@@ -251,4 +335,3 @@ export async function registerRoutes(
 
   return httpServer;
 }
-
