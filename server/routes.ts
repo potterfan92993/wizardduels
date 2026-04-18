@@ -176,38 +176,26 @@ export async function registerRoutes(
         const targetName: string =
           rawInput.replace(/@/g, "").trim().split(/\s+/)[0] || "The Host";
 
-        // targetId: null until Twitch API lookup is added in future
-        let targetId: string | null = null;
-
-        const isAutoDuel = !targetId || targetName === "The Host";
-
         // Roll random spells for both sides
         const casterSpell = SPELLS[Math.floor(Math.random() * SPELLS.length)];
         const targetSpell = SPELLS[Math.floor(Math.random() * SPELLS.length)];
 
-        // Determine winner
+        // Always resolve a real duel outcome
         const outcome = resolveDuel(casterSpell, targetSpell);
 
-        let winnerName: string;
-        let resultStatus: string;
+        const winnerName: string =
+          outcome === "WIN"
+            ? casterName
+            : outcome === "LOSE"
+            ? targetName
+            : "Draw";
 
-        if (isAutoDuel) {
-          winnerName = "Draw";
-          resultStatus = "AUTO_PRACTICE";
-        } else {
-          winnerName =
-            outcome === "WIN"
-              ? casterName
-              : outcome === "LOSE"
-              ? targetName
-              : "Draw";
-          resultStatus =
-            outcome === "WIN"
-              ? "VICTORY"
-              : outcome === "LOSE"
-              ? "DEFEAT"
-              : "DRAW";
-        }
+        const resultStatus: string =
+          outcome === "WIN"
+            ? "VICTORY"
+            : outcome === "LOSE"
+            ? "DEFEAT"
+            : "DRAW";
 
         const duelMessage = `${casterName} used ${casterSpell.name} vs ${targetName}'s ${targetSpell.name}!`;
 
@@ -216,7 +204,7 @@ export async function registerRoutes(
           await db.insert(gameEvents).values({
             caster_id: casterId,
             caster_name: casterName,
-            target_id: targetId,
+            target_id: null,
             target_name: targetName,
             caster_spell: casterSpell.name,
             target_spell: targetSpell.name,
