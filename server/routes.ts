@@ -240,29 +240,53 @@ export async function registerRoutes(
             message: duelMessage,
           });
 
-          // Send result to Twitch chat
+          // ============ SEND 3 SEQUENTIAL CHAT MESSAGES ============
           if (process.env.CHAT_TOKEN) {
             try {
-              const chatMessage =
-                winnerName === "Draw"
-                  ? `🧙‍♂️ ${casterName} vs ${targetName}! It's a Draw! ✨`
-                  : `🧙‍♂️ ${casterName} vs ${targetName}! ${winnerName} WINS with ${
-                      outcome === "WIN" ? casterSpell.name : targetSpell.name
-                    }! ✨`;
+              const sendChatMessage = async (message: string) => {
+                await fetch("https://api.twitch.tv/helix/chat/messages", {
+                  method: "POST",
+                  headers: {
+                    Authorization: `Bearer ${process.env.CHAT_TOKEN}`,
+                    "Client-Id": process.env.TWITCH_CLIENT_ID!,
+                    "Content-Type": "application/json",
+                  },
+                  body: JSON.stringify({
+                    broadcaster_id: process.env.BROADCASTER_ID,
+                    sender_id: process.env.BROADCASTER_ID,
+                    message,
+                  }),
+                });
+              };
 
-              await fetch("https://api.twitch.tv/helix/chat/messages", {
-                method: "POST",
-                headers: {
-                  Authorization: `Bearer ${process.env.CHAT_TOKEN}`,
-                  "Client-Id": process.env.TWITCH_CLIENT_ID!,
-                  "Content-Type": "application/json",
-                },
-                body: JSON.stringify({
-                  broadcaster_id: process.env.BROADCASTER_ID,
-                  sender_id: process.env.BROADCASTER_ID,
-                  message: chatMessage,
-                }),
-              });
+              const delay = (ms: number) =>
+                new Promise((resolve) => setTimeout(resolve, ms));
+
+              // Message 1 — The challenge
+              await sendChatMessage(
+                `⚔️ ${casterName} has challenged ${targetName} to a Wizard Duel!`
+              );
+
+              await delay(1500);
+
+              // Message 2 — The spells
+              await sendChatMessage(
+                `🪄 ${casterName} cast ${casterSpell.name} and ${targetName} cast ${targetSpell.name}!`
+              );
+
+              await delay(1500);
+
+              // Message 3 — The result
+              if (winnerName === "Draw") {
+                await sendChatMessage(
+                  `🤝 The duel ended in a Draw! Neither wizard prevails!`
+                );
+              } else {
+                await sendChatMessage(
+                  `🏆 ${winnerName} wins the duel! ✨`
+                );
+              }
+
             } catch (chatErr) {
               console.error("Chat message failed:", chatErr);
             }
