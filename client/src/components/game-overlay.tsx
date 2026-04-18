@@ -55,7 +55,7 @@ export function OverlayDisplay() {
           if (data.type === "DUEL_RESULT") {
             setCurrentDuel(data);
             // Auto-clear after 8 seconds
-            setTimeout(() => setCurrentDuel(null), 8000);
+            setTimeout(() => setCurrentDuel(null), 16000);
           }
         } catch (err) {
           console.error("WS parse error:", err);
