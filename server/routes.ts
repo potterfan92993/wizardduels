@@ -132,6 +132,118 @@ const verifyTwitchSignature = (req: Request): boolean => {
   return `sha256=${hmac}` === signature;
 };
 
+// ============ DUEL PROCESSOR (runs in background) ============
+// Separated so we can respond to Twitch immediately and avoid retries
+async function processDuel(event: any) {
+  const casterName: string = event.user_name;
+  const casterId: string = event.user_id;
+
+  // Extract and clean target name
+  const rawInput: string = event.user_input || "";
+  const targetName: string =
+    rawInput.replace(/@/g, "").trim().split(/\s+/)[0] || "The Host";
+
+  // Roll random spells for both sides
+  const casterSpell = SPELLS[Math.floor(Math.random() * SPELLS.length)];
+  const targetSpell = SPELLS[Math.floor(Math.random() * SPELLS.length)];
+
+  // Always resolve a real duel outcome
+  const outcome = resolveDuel(casterSpell, targetSpell);
+
+  const winnerName: string =
+    outcome === "WIN"
+      ? casterName
+      : outcome === "LOSE"
+      ? targetName
+      : "Draw";
+
+  const resultStatus: string =
+    outcome === "WIN"
+      ? "VICTORY"
+      : outcome === "LOSE"
+      ? "DEFEAT"
+      : "DRAW";
+
+  const duelMessage = `${casterName} used ${casterSpell.name} vs ${targetName}'s ${targetSpell.name}!`;
+
+  // Record duel to database
+  await db.insert(gameEvents).values({
+    caster_id: casterId,
+    caster_name: casterName,
+    target_id: null,
+    target_name: targetName,
+    caster_spell: casterSpell.name,
+    target_spell: targetSpell.name,
+    winner: winnerName,
+    result: resultStatus,
+    message: duelMessage,
+  });
+
+  // Broadcast to WebSocket clients (overlay + dashboard)
+  broadcast({
+    type: "DUEL_RESULT",
+    casterName,
+    targetName,
+    casterSpell: casterSpell.name,
+    casterSpellType: casterSpell.type,
+    casterSpellColor: casterSpell.color,
+    targetSpell: targetSpell.name,
+    targetSpellType: targetSpell.type,
+    winner: winnerName,
+    result: resultStatus,
+    message: duelMessage,
+  });
+
+  // ============ SEND 3 SEQUENTIAL CHAT MESSAGES ============
+  if (process.env.CHAT_TOKEN) {
+    const sendChatMessage = async (message: string) => {
+      await fetch("https://api.twitch.tv/helix/chat/messages", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${process.env.CHAT_TOKEN}`,
+          "Client-Id": process.env.TWITCH_CLIENT_ID!,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          broadcaster_id: process.env.BROADCASTER_ID,
+          sender_id: process.env.BROADCASTER_ID,
+          message,
+        }),
+      });
+    };
+
+    const delay = (ms: number) =>
+      new Promise((resolve) => setTimeout(resolve, ms));
+
+    // Message 1 — The challenge
+    await sendChatMessage(
+      `⚔️ ${casterName} has challenged ${targetName} to a Wizard Duel!`
+    );
+
+    await delay(1500);
+
+    // Message 2 — The spells
+    await sendChatMessage(
+      `🪄 ${casterName} cast ${casterSpell.name} and ${targetName} cast ${targetSpell.name}!`
+    );
+
+    await delay(1500);
+
+    // Message 3 — The result
+    if (winnerName === "Draw") {
+      await sendChatMessage(
+        `🤝 The duel ended in a Draw! Neither wizard prevails!`
+      );
+    } else {
+      await sendChatMessage(
+        `🏆 ${winnerName} wins the duel! ✨`
+      );
+    }
+  }
+
+  log(`Duel recorded: ${casterName} vs ${targetName} → ${winnerName} wins`, "twitch");
+}
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
@@ -145,8 +257,6 @@ export async function registerRoutes(
   });
 
   // ============ AUTO-REGISTER EVENTSUB ON STARTUP ============
-  // Waits 3s to ensure the server is fully listening before
-  // Twitch tries to verify the callback URL
   setTimeout(ensureEventSubSubscription, 3000);
 
   // ============ TWITCH WEBHOOK ============
@@ -163,131 +273,19 @@ export async function registerRoutes(
       return res.status(200).send(req.body.challenge);
     }
 
-    // Handle actual redemption
+    // FIX: Respond to Twitch IMMEDIATELY to prevent retries
+    // All duel processing happens in the background after this
+    res.status(204).send();
+
+    // Process the duel in the background
     if (messageType === "notification") {
       const event = req.body.event;
-
       if (event.reward?.title === "Wizard Duel!") {
-        const casterName: string = event.user_name;
-        const casterId: string = event.user_id;
-
-        // Extract and clean target name
-        const rawInput: string = event.user_input || "";
-        const targetName: string =
-          rawInput.replace(/@/g, "").trim().split(/\s+/)[0] || "The Host";
-
-        // Roll random spells for both sides
-        const casterSpell = SPELLS[Math.floor(Math.random() * SPELLS.length)];
-        const targetSpell = SPELLS[Math.floor(Math.random() * SPELLS.length)];
-
-        // Always resolve a real duel outcome
-        const outcome = resolveDuel(casterSpell, targetSpell);
-
-        const winnerName: string =
-          outcome === "WIN"
-            ? casterName
-            : outcome === "LOSE"
-            ? targetName
-            : "Draw";
-
-        const resultStatus: string =
-          outcome === "WIN"
-            ? "VICTORY"
-            : outcome === "LOSE"
-            ? "DEFEAT"
-            : "DRAW";
-
-        const duelMessage = `${casterName} used ${casterSpell.name} vs ${targetName}'s ${targetSpell.name}!`;
-
-        try {
-          // Record duel to database
-          await db.insert(gameEvents).values({
-            caster_id: casterId,
-            caster_name: casterName,
-            target_id: null,
-            target_name: targetName,
-            caster_spell: casterSpell.name,
-            target_spell: targetSpell.name,
-            winner: winnerName,
-            result: resultStatus,
-            message: duelMessage,
-          });
-
-          // Broadcast to WebSocket clients (overlay + dashboard)
-          broadcast({
-            type: "DUEL_RESULT",
-            casterName,
-            targetName,
-            casterSpell: casterSpell.name,
-            casterSpellType: casterSpell.type,
-            casterSpellColor: casterSpell.color,
-            targetSpell: targetSpell.name,
-            targetSpellType: targetSpell.type,
-            winner: winnerName,
-            result: resultStatus,
-            message: duelMessage,
-          });
-
-          // ============ SEND 3 SEQUENTIAL CHAT MESSAGES ============
-          if (process.env.CHAT_TOKEN) {
-            try {
-              const sendChatMessage = async (message: string) => {
-                await fetch("https://api.twitch.tv/helix/chat/messages", {
-                  method: "POST",
-                  headers: {
-                    Authorization: `Bearer ${process.env.CHAT_TOKEN}`,
-                    "Client-Id": process.env.TWITCH_CLIENT_ID!,
-                    "Content-Type": "application/json",
-                  },
-                  body: JSON.stringify({
-                    broadcaster_id: process.env.BROADCASTER_ID,
-                    sender_id: process.env.BROADCASTER_ID,
-                    message,
-                  }),
-                });
-              };
-
-              const delay = (ms: number) =>
-                new Promise((resolve) => setTimeout(resolve, ms));
-
-              // Message 1 — The challenge
-              await sendChatMessage(
-                `⚔️ ${casterName} has challenged ${targetName} to a Wizard Duel!`
-              );
-
-              await delay(1500);
-
-              // Message 2 — The spells
-              await sendChatMessage(
-                `🪄 ${casterName} cast ${casterSpell.name} and ${targetName} cast ${targetSpell.name}!`
-              );
-
-              await delay(1500);
-
-              // Message 3 — The result
-              if (winnerName === "Draw") {
-                await sendChatMessage(
-                  `🤝 The duel ended in a Draw! Neither wizard prevails!`
-                );
-              } else {
-                await sendChatMessage(
-                  `🏆 ${winnerName} wins the duel! ✨`
-                );
-              }
-
-            } catch (chatErr) {
-              console.error("Chat message failed:", chatErr);
-            }
-          }
-
-          log(`Duel recorded: ${casterName} vs ${targetName} → ${winnerName} wins`, "twitch");
-        } catch (err) {
-          console.error("Failed to process duel results:", err);
-        }
+        processDuel(event).catch((err) =>
+          console.error("Duel processing error:", err)
+        );
       }
     }
-
-    return res.status(204).send();
   });
 
   // ============ LEADERBOARD (top 10 winners) ============
