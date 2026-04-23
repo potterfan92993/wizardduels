@@ -94,23 +94,18 @@ async function getChatters(excludeUsername: string): Promise<string[]> {
 }
 
 // Automatically registers all EventSub subscriptions on startup
+// Both subscriptions use app access token for webhooks
+// channel.chat.message works because broadcaster authorized app with channel:bot scope
 async function ensureEventSubSubscription() {
   try {
     log("Checking Twitch EventSub subscriptions...", "twitch");
 
     const token = await getAppAccessToken();
 
-    // App token headers — used for channel points subscription
+    // App token headers — required for ALL webhook subscriptions
     const appHeaders = {
       "Client-ID": process.env.TWITCH_CLIENT_ID!,
       "Authorization": `Bearer ${token}`,
-      "Content-Type": "application/json",
-    };
-
-    // User token headers — required for channel.chat.message subscription
-    const chatHeaders = {
-      "Client-ID": process.env.TWITCH_CLIENT_ID!,
-      "Authorization": `Bearer ${process.env.CHAT_TOKEN}`,
       "Content-Type": "application/json",
     };
 
@@ -122,7 +117,7 @@ async function ensureEventSubSubscription() {
     const checkData = await checkRes.json();
     const existing = checkData.data || [];
 
-    // ---- Subscription 1: Channel Points Redemption (app token) ----
+    // ---- Subscription 1: Channel Points Redemption ----
     const hasRedemption = existing.some(
       (sub: any) =>
         sub.type === "channel.channel_points_custom_reward_redemption.add" &&
@@ -156,7 +151,8 @@ async function ensureEventSubSubscription() {
       }
     }
 
-    // ---- Subscription 2: Chat Messages — requires user access token ----
+    // ---- Subscription 2: Chat Messages (for !duel command) ----
+    // Requires broadcaster to have authorized app with channel:bot scope first
     const hasChatSub = existing.some(
       (sub: any) =>
         sub.type === "channel.chat.message" &&
@@ -170,7 +166,7 @@ async function ensureEventSubSubscription() {
       log("Registering chat message subscription...", "twitch");
       const res = await fetch("https://api.twitch.tv/helix/eventsub/subscriptions", {
         method: "POST",
-        headers: chatHeaders,
+        headers: appHeaders,
         body: JSON.stringify({
           type: "channel.chat.message",
           version: "1",
