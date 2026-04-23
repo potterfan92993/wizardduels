@@ -86,7 +86,7 @@ async function getChatters(excludeUsername: string): Promise<string[]> {
     return (data.data || [])
       .map((c: any) => c.user_login)
       .filter((name: string) => name.toLowerCase() !== excludeUsername.toLowerCase())
-      .slice(0, 8); // Cap at 8 to keep chat message readable
+      .slice(0, 8);
   } catch (err) {
     console.error("Chatters fetch error:", err);
     return [];
@@ -100,21 +100,29 @@ async function ensureEventSubSubscription() {
 
     const token = await getAppAccessToken();
 
-    const headers = {
+    // App token headers — used for channel points subscription
+    const appHeaders = {
       "Client-ID": process.env.TWITCH_CLIENT_ID!,
       "Authorization": `Bearer ${token}`,
+      "Content-Type": "application/json",
+    };
+
+    // User token headers — required for channel.chat.message subscription
+    const chatHeaders = {
+      "Client-ID": process.env.TWITCH_CLIENT_ID!,
+      "Authorization": `Bearer ${process.env.CHAT_TOKEN}`,
       "Content-Type": "application/json",
     };
 
     // Fetch all existing enabled subscriptions
     const checkRes = await fetch(
       "https://api.twitch.tv/helix/eventsub/subscriptions?status=enabled",
-      { headers }
+      { headers: appHeaders }
     );
     const checkData = await checkRes.json();
     const existing = checkData.data || [];
 
-    // ---- Subscription 1: Channel Points Redemption ----
+    // ---- Subscription 1: Channel Points Redemption (app token) ----
     const hasRedemption = existing.some(
       (sub: any) =>
         sub.type === "channel.channel_points_custom_reward_redemption.add" &&
@@ -128,7 +136,7 @@ async function ensureEventSubSubscription() {
       log("Registering channel points subscription...", "twitch");
       const res = await fetch("https://api.twitch.tv/helix/eventsub/subscriptions", {
         method: "POST",
-        headers,
+        headers: appHeaders,
         body: JSON.stringify({
           type: "channel.channel_points_custom_reward_redemption.add",
           version: "1",
@@ -148,7 +156,7 @@ async function ensureEventSubSubscription() {
       }
     }
 
-    // ---- Subscription 2: Chat Messages (for !duel command) ----
+    // ---- Subscription 2: Chat Messages — requires user access token ----
     const hasChatSub = existing.some(
       (sub: any) =>
         sub.type === "channel.chat.message" &&
@@ -162,7 +170,7 @@ async function ensureEventSubSubscription() {
       log("Registering chat message subscription...", "twitch");
       const res = await fetch("https://api.twitch.tv/helix/eventsub/subscriptions", {
         method: "POST",
-        headers,
+        headers: chatHeaders,
         body: JSON.stringify({
           type: "channel.chat.message",
           version: "1",
