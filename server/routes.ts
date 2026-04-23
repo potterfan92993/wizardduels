@@ -352,7 +352,7 @@ export async function registerRoutes(
         const chatMessage: string = event.message?.text?.trim() || "";
         const chatterName: string = event.chatter_user_name;
 
-        if (chatMessage.toLowerCase() === "!duel") {
+        if (chatMessage.toLowerCase() === "!duel_list") {
           try {
             const chatters = await getChatters(chatterName);
             if (chatters.length === 0) {
