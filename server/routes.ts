@@ -44,8 +44,27 @@ async function getAppAccessToken(): Promise<string> {
   return data.access_token;
 }
 
-// Fetches current chatters and returns a list of usernames
-// excluding the caster themselves
+// Sends a single chat message
+async function sendChatMessage(message: string) {
+  await fetch("https://api.twitch.tv/helix/chat/messages", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.CHAT_TOKEN}`,
+      "Client-Id": process.env.TWITCH_CLIENT_ID!,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      broadcaster_id: process.env.BROADCASTER_ID,
+      sender_id: process.env.BROADCASTER_ID,
+      message,
+    }),
+  });
+}
+
+// Simple delay helper
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Fetches current chatters, excluding the requesting user
 async function getChatters(excludeUsername: string): Promise<string[]> {
   try {
     const response = await fetch(
@@ -67,18 +86,17 @@ async function getChatters(excludeUsername: string): Promise<string[]> {
     return (data.data || [])
       .map((c: any) => c.user_login)
       .filter((name: string) => name.toLowerCase() !== excludeUsername.toLowerCase())
-      .slice(0, 8); // Cap at 8 names to keep chat message readable
+      .slice(0, 8); // Cap at 8 to keep chat message readable
   } catch (err) {
     console.error("Chatters fetch error:", err);
     return [];
   }
 }
 
-// Automatically registers the EventSub subscription on startup
-// Checks if it already exists first to avoid duplicates
+// Automatically registers all EventSub subscriptions on startup
 async function ensureEventSubSubscription() {
   try {
-    log("Checking Twitch EventSub subscription...", "twitch");
+    log("Checking Twitch EventSub subscriptions...", "twitch");
 
     const token = await getAppAccessToken();
 
@@ -88,39 +106,69 @@ async function ensureEventSubSubscription() {
       "Content-Type": "application/json",
     };
 
-    // Check if subscription already exists and is enabled
+    // Fetch all existing enabled subscriptions
     const checkRes = await fetch(
       "https://api.twitch.tv/helix/eventsub/subscriptions?status=enabled",
       { headers }
     );
     const checkData = await checkRes.json();
+    const existing = checkData.data || [];
 
-    const existing = checkData.data?.find(
+    // ---- Subscription 1: Channel Points Redemption ----
+    const hasRedemption = existing.some(
       (sub: any) =>
         sub.type === "channel.channel_points_custom_reward_redemption.add" &&
         sub.condition?.broadcaster_user_id === process.env.BROADCASTER_ID &&
-        sub.transport?.callback ===
-          `${process.env.RENDER_EXTERNAL_URL}/api/twitch/webhook`
+        sub.transport?.callback === `${process.env.RENDER_EXTERNAL_URL}/api/twitch/webhook`
     );
 
-    if (existing) {
-      log(`EventSub already active (id: ${existing.id})`, "twitch");
-      return;
-    }
-
-    // Subscription not found — create it
-    log("Registering new EventSub subscription...", "twitch");
-
-    const createRes = await fetch(
-      "https://api.twitch.tv/helix/eventsub/subscriptions",
-      {
+    if (hasRedemption) {
+      log("Channel points subscription already active", "twitch");
+    } else {
+      log("Registering channel points subscription...", "twitch");
+      const res = await fetch("https://api.twitch.tv/helix/eventsub/subscriptions", {
         method: "POST",
         headers,
         body: JSON.stringify({
           type: "channel.channel_points_custom_reward_redemption.add",
           version: "1",
+          condition: { broadcaster_user_id: process.env.BROADCASTER_ID },
+          transport: {
+            method: "webhook",
+            callback: `${process.env.RENDER_EXTERNAL_URL}/api/twitch/webhook`,
+            secret: process.env.TWITCH_WEBHOOK_SECRET,
+          },
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        log(`Channel points subscription failed: ${JSON.stringify(data)}`, "twitch");
+      } else {
+        log(`Channel points subscription registered (id: ${data.data?.[0]?.id})`, "twitch");
+      }
+    }
+
+    // ---- Subscription 2: Chat Messages (for !duel command) ----
+    const hasChatSub = existing.some(
+      (sub: any) =>
+        sub.type === "channel.chat.message" &&
+        sub.condition?.broadcaster_user_id === process.env.BROADCASTER_ID &&
+        sub.transport?.callback === `${process.env.RENDER_EXTERNAL_URL}/api/twitch/webhook`
+    );
+
+    if (hasChatSub) {
+      log("Chat message subscription already active", "twitch");
+    } else {
+      log("Registering chat message subscription...", "twitch");
+      const res = await fetch("https://api.twitch.tv/helix/eventsub/subscriptions", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          type: "channel.chat.message",
+          version: "1",
           condition: {
             broadcaster_user_id: process.env.BROADCASTER_ID,
+            user_id: process.env.BROADCASTER_ID,
           },
           transport: {
             method: "webhook",
@@ -128,15 +176,13 @@ async function ensureEventSubSubscription() {
             secret: process.env.TWITCH_WEBHOOK_SECRET,
           },
         }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        log(`Chat subscription failed: ${JSON.stringify(data)}`, "twitch");
+      } else {
+        log(`Chat subscription registered (id: ${data.data?.[0]?.id})`, "twitch");
       }
-    );
-
-    const createData = await createRes.json();
-
-    if (!createRes.ok) {
-      log(`EventSub registration failed: ${JSON.stringify(createData)}`, "twitch");
-    } else {
-      log(`EventSub registered successfully (id: ${createData.data?.[0]?.id})`, "twitch");
     }
   } catch (err) {
     log(`EventSub setup error: ${err}`, "twitch");
@@ -152,7 +198,6 @@ const verifyTwitchSignature = (req: Request): boolean => {
 
   if (!secret || !messageId || !timestamp || !signature) return false;
 
-  // Use raw body bytes, not re-serialized JSON
   const hmac = crypto
     .createHmac("sha256", secret)
     .update(
@@ -166,40 +211,28 @@ const verifyTwitchSignature = (req: Request): boolean => {
 };
 
 // ============ DUEL PROCESSOR (runs in background) ============
-// Separated so we can respond to Twitch immediately and avoid retries
 async function processDuel(event: any) {
   const casterName: string = event.user_name;
   const casterId: string = event.user_id;
 
-  // Extract and clean target name
   const rawInput: string = event.user_input || "";
   const targetName: string =
     rawInput.replace(/@/g, "").trim().split(/\s+/)[0] || "The Host";
 
-  // Roll random spells for both sides
   const casterSpell = SPELLS[Math.floor(Math.random() * SPELLS.length)];
   const targetSpell = SPELLS[Math.floor(Math.random() * SPELLS.length)];
 
-  // Always resolve a real duel outcome
   const outcome = resolveDuel(casterSpell, targetSpell);
 
   const winnerName: string =
-    outcome === "WIN"
-      ? casterName
-      : outcome === "LOSE"
-      ? targetName
-      : "Draw";
+    outcome === "WIN" ? casterName : outcome === "LOSE" ? targetName : "Draw";
 
   const resultStatus: string =
-    outcome === "WIN"
-      ? "VICTORY"
-      : outcome === "LOSE"
-      ? "DEFEAT"
-      : "DRAW";
+    outcome === "WIN" ? "VICTORY" : outcome === "LOSE" ? "DEFEAT" : "DRAW";
 
   const duelMessage = `${casterName} used ${casterSpell.name} vs ${targetName}'s ${targetSpell.name}!`;
 
-  // Record duel to database
+  // Record to database
   await db.insert(gameEvents).values({
     caster_id: casterId,
     caster_name: casterName,
@@ -212,7 +245,7 @@ async function processDuel(event: any) {
     message: duelMessage,
   });
 
-  // Broadcast to WebSocket clients (overlay + dashboard)
+  // Broadcast to WebSocket clients
   broadcast({
     type: "DUEL_RESULT",
     casterName,
@@ -227,50 +260,29 @@ async function processDuel(event: any) {
     message: duelMessage,
   });
 
-  // ============ SEND CHAT MESSAGES ============
+  // Send 3 sequential chat messages
   if (process.env.CHAT_TOKEN) {
-    const sendChatMessage = async (message: string) => {
-      await fetch("https://api.twitch.tv/helix/chat/messages", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${process.env.CHAT_TOKEN}`,
-          "Client-Id": process.env.TWITCH_CLIENT_ID!,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          broadcaster_id: process.env.BROADCASTER_ID,
-          sender_id: process.env.BROADCASTER_ID,
-          message,
-        }),
-      });
-    };
-
-    const delay = (ms: number) =>
-      new Promise((resolve) => setTimeout(resolve, ms));
-
-    // Message 1 — The challenge
-    await sendChatMessage(
-      `⚔️ ${casterName} has challenged ${targetName} to a Wizard Duel!`
-    );
-
-    await delay(1500);
-
-    // Message 2 — The spells
-    await sendChatMessage(
-      `🪄 ${casterName} cast ${casterSpell.name} and ${targetName} cast ${targetSpell.name}!`
-    );
-
-    await delay(1500);
-
-    // Message 3 — The result
-    if (winnerName === "Draw") {
+    try {
+      // Message 1 — The challenge
       await sendChatMessage(
-        `🤝 The duel ended in a Draw! Neither wizard prevails!`
+        `⚔️ ${casterName} has challenged ${targetName} to a Wizard Duel!`
       );
-    } else {
+      await delay(1500);
+
+      // Message 2 — The spells
       await sendChatMessage(
-        `🏆 ${winnerName} wins the duel! ✨`
+        `🪄 ${casterName} cast ${casterSpell.name} and ${targetName} cast ${targetSpell.name}!`
       );
+      await delay(1500);
+
+      // Message 3 — The result
+      if (winnerName === "Draw") {
+        await sendChatMessage(`🤝 The duel ended in a Draw! Neither wizard prevails!`);
+      } else {
+        await sendChatMessage(`🏆 ${winnerName} wins the duel! ✨`);
+      }
+    } catch (chatErr) {
+      console.error("Chat message failed:", chatErr);
     }
   }
 
@@ -298,13 +310,12 @@ export async function registerRoutes(
       return res.status(403).send("Forbidden");
     }
 
-    // Deduplicate — ignore if we've already processed this message
+    // Deduplicate — ignore already processed messages
     const messageId = req.headers["twitch-eventsub-message-id"] as string;
     if (processedMessageIds.has(messageId)) {
       return res.status(204).send();
     }
     processedMessageIds.add(messageId);
-    // Clean up old IDs after 10 minutes to prevent memory leak
     setTimeout(() => processedMessageIds.delete(messageId), 10 * 60 * 1000);
 
     const messageType = req.headers["twitch-eventsub-message-type"];
@@ -315,46 +326,45 @@ export async function registerRoutes(
       return res.status(200).send(req.body.challenge);
     }
 
-    // FIX: Respond to Twitch IMMEDIATELY to prevent retries
+    // Respond to Twitch immediately to prevent retries
     res.status(204).send();
 
-    // Process in background
     if (messageType === "notification") {
       const event = req.body.event;
+      const subscriptionType = req.body.subscription?.type;
 
-      if (event.reward?.title === "Wizard Duel!") {
-        const casterName: string = event.user_name;
-
-        // Post available chatters in chat before processing the duel
-        if (process.env.CHAT_TOKEN) {
-          try {
-            const chatters = await getChatters(casterName);
-
-            if (chatters.length > 0) {
-              const chatterList = chatters.map((c) => `@${c}`).join(" ");
-              await fetch("https://api.twitch.tv/helix/chat/messages", {
-                method: "POST",
-                headers: {
-                  Authorization: `Bearer ${process.env.CHAT_TOKEN}`,
-                  "Client-Id": process.env.TWITCH_CLIENT_ID!,
-                  "Content-Type": "application/json",
-                },
-                body: JSON.stringify({
-                  broadcaster_id: process.env.BROADCASTER_ID,
-                  sender_id: process.env.BROADCASTER_ID,
-                  message: `⚔️ ${casterName} wants to duel! Available wizards in chat: ${chatterList}`,
-                }),
-              });
-            }
-          } catch (err) {
-            console.error("Chatters message failed:", err);
-          }
-        }
-
-        // Process the duel
+      // ---- Channel Points Redemption → Run Duel ----
+      if (
+        subscriptionType === "channel.channel_points_custom_reward_redemption.add" &&
+        event.reward?.title === "Wizard Duel!"
+      ) {
         processDuel(event).catch((err) =>
           console.error("Duel processing error:", err)
         );
+      }
+
+      // ---- Chat Message → Handle !duel command ----
+      if (subscriptionType === "channel.chat.message") {
+        const chatMessage: string = event.message?.text?.trim() || "";
+        const chatterName: string = event.chatter_user_name;
+
+        if (chatMessage.toLowerCase() === "!duel") {
+          try {
+            const chatters = await getChatters(chatterName);
+            if (chatters.length === 0) {
+              await sendChatMessage(
+                `🧙 No wizards available to duel right now, ${chatterName}!`
+              );
+            } else {
+              const chatterList = chatters.map((c) => `@${c}`).join(" ");
+              await sendChatMessage(
+                `🧙 Available wizards to duel: ${chatterList} — redeem "Wizard Duel!" and type their name!`
+              );
+            }
+          } catch (err) {
+            console.error("!duel command failed:", err);
+          }
+        }
       }
     }
   });
