@@ -18,6 +18,9 @@ function broadcast(data: object) {
   });
 }
 
+// Store recently processed message IDs to prevent duplicate processing
+const processedMessageIds = new Set<string>();
+
 // ============ TWITCH HELPERS ============
 
 // Gets a fresh app access token using Client Credentials
@@ -39,6 +42,36 @@ async function getAppAccessToken(): Promise<string> {
 
   const data = await response.json();
   return data.access_token;
+}
+
+// Fetches current chatters and returns a list of usernames
+// excluding the caster themselves
+async function getChatters(excludeUsername: string): Promise<string[]> {
+  try {
+    const response = await fetch(
+      `https://api.twitch.tv/helix/chat/chatters?broadcaster_id=${process.env.BROADCASTER_ID}&moderator_id=${process.env.MODERATOR_ID}&first=20`,
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.CHAT_TOKEN}`,
+          "Client-Id": process.env.TWITCH_CLIENT_ID!,
+        },
+      }
+    );
+
+    if (!response.ok) {
+      console.error("Failed to fetch chatters:", await response.text());
+      return [];
+    }
+
+    const data = await response.json();
+    return (data.data || [])
+      .map((c: any) => c.user_login)
+      .filter((name: string) => name.toLowerCase() !== excludeUsername.toLowerCase())
+      .slice(0, 8); // Cap at 8 names to keep chat message readable
+  } catch (err) {
+    console.error("Chatters fetch error:", err);
+    return [];
+  }
 }
 
 // Automatically registers the EventSub subscription on startup
@@ -194,7 +227,7 @@ async function processDuel(event: any) {
     message: duelMessage,
   });
 
-  // ============ SEND 3 SEQUENTIAL CHAT MESSAGES ============
+  // ============ SEND CHAT MESSAGES ============
   if (process.env.CHAT_TOKEN) {
     const sendChatMessage = async (message: string) => {
       await fetch("https://api.twitch.tv/helix/chat/messages", {
@@ -265,6 +298,15 @@ export async function registerRoutes(
       return res.status(403).send("Forbidden");
     }
 
+    // Deduplicate — ignore if we've already processed this message
+    const messageId = req.headers["twitch-eventsub-message-id"] as string;
+    if (processedMessageIds.has(messageId)) {
+      return res.status(204).send();
+    }
+    processedMessageIds.add(messageId);
+    // Clean up old IDs after 10 minutes to prevent memory leak
+    setTimeout(() => processedMessageIds.delete(messageId), 10 * 60 * 1000);
+
     const messageType = req.headers["twitch-eventsub-message-type"];
 
     // Handle Twitch verification challenge
@@ -274,13 +316,42 @@ export async function registerRoutes(
     }
 
     // FIX: Respond to Twitch IMMEDIATELY to prevent retries
-    // All duel processing happens in the background after this
     res.status(204).send();
 
-    // Process the duel in the background
+    // Process in background
     if (messageType === "notification") {
       const event = req.body.event;
+
       if (event.reward?.title === "Wizard Duel!") {
+        const casterName: string = event.user_name;
+
+        // Post available chatters in chat before processing the duel
+        if (process.env.CHAT_TOKEN) {
+          try {
+            const chatters = await getChatters(casterName);
+
+            if (chatters.length > 0) {
+              const chatterList = chatters.map((c) => `@${c}`).join(" ");
+              await fetch("https://api.twitch.tv/helix/chat/messages", {
+                method: "POST",
+                headers: {
+                  Authorization: `Bearer ${process.env.CHAT_TOKEN}`,
+                  "Client-Id": process.env.TWITCH_CLIENT_ID!,
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                  broadcaster_id: process.env.BROADCASTER_ID,
+                  sender_id: process.env.BROADCASTER_ID,
+                  message: `⚔️ ${casterName} wants to duel! Available wizards in chat: ${chatterList}`,
+                }),
+              });
+            }
+          } catch (err) {
+            console.error("Chatters message failed:", err);
+          }
+        }
+
+        // Process the duel
         processDuel(event).catch((err) =>
           console.error("Duel processing error:", err)
         );
