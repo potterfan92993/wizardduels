@@ -7,6 +7,7 @@ import { eq, desc, sql } from "drizzle-orm";
 import crypto from "crypto";
 import { SPELLS, resolveDuel } from "../shared/game-logic";
 import { log } from "./index";
+import { startChatBot } from "./chatbot";
 
 // ============ WEBSOCKET SETUP ============
 const clients = new Set<any>();
@@ -93,16 +94,14 @@ async function getChatters(excludeUsername: string): Promise<string[]> {
   }
 }
 
-// Automatically registers all EventSub subscriptions on startup
-// Both subscriptions use app access token for webhooks
-// channel.chat.message works because broadcaster authorized app with channel:bot scope
+// Automatically registers EventSub subscription on startup
+// Only registers channel points redemption — chat is handled via IRC
 async function ensureEventSubSubscription() {
   try {
     log("Checking Twitch EventSub subscriptions...", "twitch");
 
     const token = await getAppAccessToken();
 
-    // App token headers — required for ALL webhook subscriptions
     const appHeaders = {
       "Client-ID": process.env.TWITCH_CLIENT_ID!,
       "Authorization": `Bearer ${token}`,
@@ -117,7 +116,7 @@ async function ensureEventSubSubscription() {
     const checkData = await checkRes.json();
     const existing = checkData.data || [];
 
-    // ---- Subscription 1: Channel Points Redemption ----
+    // ---- Channel Points Redemption ----
     const hasRedemption = existing.some(
       (sub: any) =>
         sub.type === "channel.channel_points_custom_reward_redemption.add" &&
@@ -148,44 +147,6 @@ async function ensureEventSubSubscription() {
         log(`Channel points subscription failed: ${JSON.stringify(data)}`, "twitch");
       } else {
         log(`Channel points subscription registered (id: ${data.data?.[0]?.id})`, "twitch");
-      }
-    }
-
-    // ---- Subscription 2: Chat Messages (for !duel command) ----
-    // Requires broadcaster to have authorized app with channel:bot scope first
-    const hasChatSub = existing.some(
-      (sub: any) =>
-        sub.type === "channel.chat.message" &&
-        sub.condition?.broadcaster_user_id === process.env.BROADCASTER_ID &&
-        sub.transport?.callback === `${process.env.RENDER_EXTERNAL_URL}/api/twitch/webhook`
-    );
-
-    if (hasChatSub) {
-      log("Chat message subscription already active", "twitch");
-    } else {
-      log("Registering chat message subscription...", "twitch");
-      const res = await fetch("https://api.twitch.tv/helix/eventsub/subscriptions", {
-        method: "POST",
-        headers: appHeaders,
-        body: JSON.stringify({
-          type: "channel.chat.message",
-          version: "1",
-          condition: {
-            broadcaster_user_id: process.env.BROADCASTER_ID,
-            user_id: process.env.BROADCASTER_ID,
-          },
-          transport: {
-            method: "webhook",
-            callback: `${process.env.RENDER_EXTERNAL_URL}/api/twitch/webhook`,
-            secret: process.env.TWITCH_WEBHOOK_SECRET,
-          },
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        log(`Chat subscription failed: ${JSON.stringify(data)}`, "twitch");
-      } else {
-        log(`Chat subscription registered (id: ${data.data?.[0]?.id})`, "twitch");
       }
     }
   } catch (err) {
@@ -293,6 +254,26 @@ async function processDuel(event: any) {
   log(`Duel recorded: ${casterName} vs ${targetName} → ${winnerName} wins`, "twitch");
 }
 
+// ============ !duel COMMAND HANDLER ============
+// Called by IRC chatbot when a viewer types !duel
+async function handleDuelCommand(username: string) {
+  try {
+    const chatters = await getChatters(username);
+    if (chatters.length === 0) {
+      await sendChatMessage(
+        `🧙 No wizards available to duel right now, ${username}!`
+      );
+    } else {
+      const chatterList = chatters.map((c) => `@${c}`).join(" ");
+      await sendChatMessage(
+        `🧙 Available wizards to duel: ${chatterList} — redeem "Wizard Duel!" and type their name!`
+      );
+    }
+  } catch (err) {
+    console.error("!duel command failed:", err);
+  }
+}
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
@@ -307,6 +288,9 @@ export async function registerRoutes(
 
   // ============ AUTO-REGISTER EVENTSUB ON STARTUP ============
   setTimeout(ensureEventSubSubscription, 3000);
+
+  // ============ START IRC CHATBOT FOR !duel COMMAND ============
+  startChatBot(handleDuelCommand);
 
   // ============ TWITCH WEBHOOK ============
   app.post("/api/twitch/webhook", async (req, res) => {
@@ -345,30 +329,6 @@ export async function registerRoutes(
         processDuel(event).catch((err) =>
           console.error("Duel processing error:", err)
         );
-      }
-
-      // ---- Chat Message → Handle !duel command ----
-      if (subscriptionType === "channel.chat.message") {
-        const chatMessage: string = event.message?.text?.trim() || "";
-        const chatterName: string = event.chatter_user_name;
-
-        if (chatMessage.toLowerCase() === "!duel") {
-          try {
-            const chatters = await getChatters(chatterName);
-            if (chatters.length === 0) {
-              await sendChatMessage(
-                `🧙 No wizards available to duel right now, ${chatterName}!`
-              );
-            } else {
-              const chatterList = chatters.map((c) => `@${c}`).join(" ");
-              await sendChatMessage(
-                `🧙 Available wizards to duel: ${chatterList} — redeem "Wizard Duel!" and type their name!`
-              );
-            }
-          } catch (err) {
-            console.error("!duel command failed:", err);
-          }
-        }
       }
     }
   });
