@@ -22,6 +22,18 @@ function broadcast(data: object) {
 // Store recently processed message IDs to prevent duplicate processing
 const processedMessageIds = new Set<string>();
 
+// Known bots to exclude from duel targets
+const BOT_BLOCKLIST = new Set([
+  "streamelements",
+  "nightbot",
+  "streamlabs",
+  "moobot",
+  "fossabot",
+  "wizebot",
+  "botisimo",
+  "soundalerts",
+]);
+
 // ============ TWITCH HELPERS ============
 
 // Gets a fresh app access token using Client Credentials
@@ -65,7 +77,8 @@ async function sendChatMessage(message: string) {
 // Simple delay helper
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Fetches current chatters, excluding the requesting user
+// Fetches current chatters, excluding bots and the requesting user
+// Always includes the broadcaster as a potential opponent
 async function getChatters(excludeUsername: string): Promise<string[]> {
   try {
     const response = await fetch(
@@ -84,10 +97,27 @@ async function getChatters(excludeUsername: string): Promise<string[]> {
     }
 
     const data = await response.json();
-    return (data.data || [])
-      .map((c: any) => c.user_login)
-      .filter((name: string) => name.toLowerCase() !== excludeUsername.toLowerCase())
-      .slice(0, 8);
+    const broadcasterUsername = (process.env.BROADCASTER_USERNAME || "").toLowerCase();
+
+    // Filter out the requester and known bots, cap at 7 to leave room for broadcaster
+    let chatters: string[] = (data.data || [])
+      .map((c: any) => c.user_login as string)
+      .filter((name: string) =>
+        name.toLowerCase() !== excludeUsername.toLowerCase() &&
+        !BOT_BLOCKLIST.has(name.toLowerCase())
+      )
+      .slice(0, 7);
+
+    // Always include broadcaster at the top unless they're the one asking
+    if (
+      broadcasterUsername &&
+      excludeUsername.toLowerCase() !== broadcasterUsername &&
+      !chatters.includes(broadcasterUsername)
+    ) {
+      chatters = [broadcasterUsername, ...chatters].slice(0, 8);
+    }
+
+    return chatters;
   } catch (err) {
     console.error("Chatters fetch error:", err);
     return [];
@@ -95,7 +125,6 @@ async function getChatters(excludeUsername: string): Promise<string[]> {
 }
 
 // Automatically registers EventSub subscription on startup
-// Only registers channel points redemption — chat is handled via IRC
 async function ensureEventSubSubscription() {
   try {
     log("Checking Twitch EventSub subscriptions...", "twitch");
@@ -255,7 +284,6 @@ async function processDuel(event: any) {
 }
 
 // ============ !duel COMMAND HANDLER ============
-// Called by IRC chatbot when a viewer types !duel
 async function handleDuelCommand(username: string) {
   try {
     const chatters = await getChatters(username);
