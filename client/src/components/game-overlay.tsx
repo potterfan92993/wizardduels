@@ -28,7 +28,7 @@ function spellEmoji(type: string): string {
 function resultColor(result: string): string {
   if (result === "VICTORY") return "text-yellow-400";
   if (result === "DEFEAT") return "text-red-400";
-  if (result === "DRAW" || result === "AUTO_PRACTICE") return "text-cyan-400";
+  if (result === "DRAW") return "text-cyan-400";
   return "text-white";
 }
 
@@ -55,7 +55,7 @@ export function OverlayDisplay() {
           if (data.type === "DUEL_RESULT") {
             setCurrentDuel(data);
             // Auto-clear after 8 seconds
-            setTimeout(() => setCurrentDuel(null), 16000);
+            setTimeout(() => setCurrentDuel(null), 8000);
           }
         } catch (err) {
           console.error("WS parse error:", err);
@@ -84,11 +84,12 @@ export function OverlayDisplay() {
   }, []);
 
   return (
-    <div className="w-full h-screen flex items-center justify-center bg-transparent pointer-events-none overflow-hidden">
+    <div className="w-full h-screen flex flex-col items-center justify-center bg-transparent pointer-events-none overflow-hidden relative">
 
       {/* Small connection indicator - green = connected, red = reconnecting */}
       <div className={`fixed top-2 right-2 w-2 h-2 rounded-full ${connected ? "bg-green-500" : "bg-red-500"}`} />
 
+      {/* ===== DUEL ANIMATION (center screen) ===== */}
       <AnimatePresence>
         {currentDuel && (
           <motion.div
@@ -97,7 +98,7 @@ export function OverlayDisplay() {
             animate={{ scale: 1, opacity: 1, y: 0 }}
             exit={{ scale: 0, opacity: 0, y: -60 }}
             transition={{ type: "spring", damping: 14, stiffness: 120 }}
-            className="relative bg-black/85 border-2 border-cyan-500/60 rounded-3xl p-8 max-w-2xl w-full text-center shadow-[0_0_60px_rgba(0,255,255,0.25)] backdrop-blur-md"
+            className="relative bg-black/85 border-2 border-cyan-500/60 rounded-3xl p-8 max-w-2xl w-full text-center shadow-[0_0_60px_rgba(0,255,255,0.25)] backdrop-blur-md mx-8"
           >
             {/* Animated background glow */}
             <div className="absolute inset-0 bg-gradient-to-br from-cyan-500/10 to-purple-600/10 rounded-3xl animate-pulse pointer-events-none" />
@@ -155,9 +156,7 @@ export function OverlayDisplay() {
                 transition={{ delay: 0.4, type: "spring" }}
                 className="space-y-1"
               >
-                {currentDuel.result === "AUTO_PRACTICE" ? (
-                  <p className="text-lg font-bold text-cyan-400">⚡ Practice Duel — No Contest</p>
-                ) : currentDuel.winner === "Draw" ? (
+                {currentDuel.winner === "Draw" ? (
                   <p className="text-2xl font-black text-cyan-400">It's a Draw! 🤝</p>
                 ) : (
                   <p className={`text-3xl font-black ${resultColor(currentDuel.result)}`}>
@@ -171,6 +170,21 @@ export function OverlayDisplay() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* ===== PERSISTENT INSTRUCTION BAR (bottom of screen) ===== */}
+      <div className="fixed bottom-6 left-1/2 -translate-x-1/2">
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 1, duration: 0.8 }}
+          className="bg-black/70 border border-cyan-500/30 rounded-full px-6 py-2 backdrop-blur-sm"
+        >
+          <p className="text-cyan-400 text-sm font-semibold tracking-wide whitespace-nowrap">
+            🧙 Type <span className="text-white font-black">!duel</span> for potential duelists!
+          </p>
+        </motion.div>
+      </div>
+
     </div>
   );
 }
