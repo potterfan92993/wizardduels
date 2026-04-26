@@ -172,14 +172,14 @@ export function OverlayDisplay() {
       </AnimatePresence>
 
       {/* ===== PERSISTENT INSTRUCTION BAR (bottom of screen) ===== */}
-      <div className="fixed bottom-6 left-1/2 -translate-x-1/2">
+      <div className="fixed bottom-6 left-6">
         <motion.div
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 1, duration: 0.8 }}
           className="bg-black/70 border border-cyan-500/30 rounded-full px-6 py-2 backdrop-blur-sm"
         >
-          <p className="text-cyan-400 text-sm font-semibold tracking-wide whitespace-nowrap">
+          <p className="text-cyan-400 text-xl font-semibold tracking-wide whitespace-nowrap">
             🧙 Type <span className="text-white font-black">!duel</span> for potential duelists!
           </p>
         </motion.div>
