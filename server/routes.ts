@@ -257,19 +257,16 @@ async function processDuel(event: any) {
   // Send 3 sequential chat messages
   if (process.env.CHAT_TOKEN) {
     try {
-      // Message 1 — The challenge
       await sendChatMessage(
         `⚔️ ${casterName} has challenged ${targetName} to a Wizard Duel!`
       );
       await delay(1500);
 
-      // Message 2 — The spells
       await sendChatMessage(
         `🪄 ${casterName} cast ${casterSpell.name} and ${targetName} cast ${targetSpell.name}!`
       );
       await delay(1500);
 
-      // Message 3 — The result
       if (winnerName === "Draw") {
         await sendChatMessage(`🤝 The duel ended in a Draw! Neither wizard prevails!`);
       } else {
@@ -323,40 +320,49 @@ export async function registerRoutes(
   // ============ TWITCH WEBHOOK ============
   app.post("/api/twitch/webhook", async (req, res) => {
     if (!verifyTwitchSignature(req)) {
+      log("Webhook signature verification failed", "twitch");
       return res.status(403).send("Forbidden");
     }
 
-    // Deduplicate — ignore already processed messages
     const messageId = req.headers["twitch-eventsub-message-id"] as string;
-    if (processedMessageIds.has(messageId)) {
-      return res.status(204).send();
-    }
-    processedMessageIds.add(messageId);
-    setTimeout(() => processedMessageIds.delete(messageId), 10 * 60 * 1000);
+    const messageType = req.headers["twitch-eventsub-message-type"] as string;
+    const subscriptionType = req.body.subscription?.type;
 
-    const messageType = req.headers["twitch-eventsub-message-type"];
+    // DEBUG: Log every incoming webhook so we can see exactly what Twitch is sending
+    log(`Webhook received: type=${messageType} sub=${subscriptionType} id=${messageId} reward="${req.body.event?.reward?.title}"`, "twitch");
 
-    // Handle Twitch verification challenge
+    // Handle Twitch verification challenge — must respond before deduplication
     if (messageType === "webhook_callback_verification") {
       log("Twitch webhook verified successfully", "twitch");
       return res.status(200).send(req.body.challenge);
     }
+
+    // Deduplicate — ignore already processed messages
+    if (processedMessageIds.has(messageId)) {
+      log(`Duplicate message ignored: ${messageId}`, "twitch");
+      return res.status(204).send();
+    }
+    processedMessageIds.add(messageId);
+    setTimeout(() => processedMessageIds.delete(messageId), 10 * 60 * 1000);
 
     // Respond to Twitch immediately to prevent retries
     res.status(204).send();
 
     if (messageType === "notification") {
       const event = req.body.event;
-      const subscriptionType = req.body.subscription?.type;
 
       // ---- Channel Points Redemption → Run Duel ----
       if (
         subscriptionType === "channel.channel_points_custom_reward_redemption.add" &&
         event.reward?.title === "Wizard Duel!"
       ) {
+        log(`Duel triggered by ${event.user_name} targeting "${event.user_input}"`, "twitch");
         processDuel(event).catch((err) =>
           console.error("Duel processing error:", err)
         );
+      } else if (subscriptionType === "channel.channel_points_custom_reward_redemption.add") {
+        // Log if reward title doesn't match so we can see the actual title
+        log(`Redemption received but title did not match: "${event.reward?.title}"`, "twitch");
       }
     }
   });
