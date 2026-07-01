@@ -328,10 +328,10 @@ export async function registerRoutes(
     const messageType = req.headers["twitch-eventsub-message-type"] as string;
     const subscriptionType = req.body.subscription?.type;
 
-    // DEBUG: Log every incoming webhook so we can see exactly what Twitch is sending
+    // DEBUG: Log every incoming webhook
     log(`Webhook received: type=${messageType} sub=${subscriptionType} id=${messageId} reward="${req.body.event?.reward?.title}"`, "twitch");
 
-    // Handle Twitch verification challenge — must respond before deduplication
+    // Handle Twitch verification challenge
     if (messageType === "webhook_callback_verification") {
       log("Twitch webhook verified successfully", "twitch");
       return res.status(200).send(req.body.challenge);
@@ -361,7 +361,6 @@ export async function registerRoutes(
           console.error("Duel processing error:", err)
         );
       } else if (subscriptionType === "channel.channel_points_custom_reward_redemption.add") {
-        // Log if reward title doesn't match so we can see the actual title
         log(`Redemption received but title did not match: "${event.reward?.title}"`, "twitch");
       }
     }
@@ -418,8 +417,15 @@ export async function registerRoutes(
   });
 
   // ============ HEALTH CHECK ============
-  app.get("/api/health", (req, res) => {
-    res.json({ status: "Backend is running!" });
+  // Queries the DB so UptimeRobot pings keep Supabase active
+  app.get("/api/health", async (req, res) => {
+    try {
+      await db.select({ count: sql<number>`count(*)` }).from(gameEvents);
+      res.json({ status: "Backend is running!", db: "connected" });
+    } catch (err) {
+      // Still return 200 so UptimeRobot doesn't alert on DB hiccups
+      res.json({ status: "Backend is running!", db: "disconnected" });
+    }
   });
 
   return httpServer;
