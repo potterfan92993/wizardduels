@@ -57,9 +57,9 @@ async function getAppAccessToken(): Promise<string> {
   return data.access_token;
 }
 
-// Sends a single chat message
+// Sends a single chat message with detailed error logging
 async function sendChatMessage(message: string) {
-  await fetch("https://api.twitch.tv/helix/chat/messages", {
+  const response = await fetch("https://api.twitch.tv/helix/chat/messages", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${process.env.CHAT_TOKEN}`,
@@ -72,6 +72,26 @@ async function sendChatMessage(message: string) {
       message,
     }),
   });
+
+  if (!response.ok) {
+    const errorData = await response.json();
+    const status = response.status;
+
+    // Log specific actionable error messages
+    if (status === 401) {
+      log(`❌ CHAT TOKEN EXPIRED — regenerate CHAT_TOKEN in Render env vars. Error: ${JSON.stringify(errorData)}`, "chat");
+    } else if (status === 403) {
+      log(`❌ CHAT TOKEN MISSING SCOPE — regenerate CHAT_TOKEN with correct scopes. Error: ${JSON.stringify(errorData)}`, "chat");
+    } else if (status === 400) {
+      log(`❌ CHAT BAD REQUEST — check BROADCASTER_ID env var. Error: ${JSON.stringify(errorData)}`, "chat");
+    } else {
+      log(`❌ CHAT MESSAGE FAILED (${status}) — ${JSON.stringify(errorData)}`, "chat");
+    }
+
+    throw new Error(`Chat message failed: ${status}`);
+  } else {
+    log(`✅ Chat message sent: "${message}"`, "chat");
+  }
 }
 
 // Simple delay helper
@@ -92,7 +112,8 @@ async function getChatters(excludeUsername: string): Promise<string[]> {
     );
 
     if (!response.ok) {
-      console.error("Failed to fetch chatters:", await response.text());
+      const errorData = await response.json();
+      log(`❌ CHATTERS FETCH FAILED (${response.status}) — ${JSON.stringify(errorData)}`, "chat");
       return [];
     }
 
@@ -273,7 +294,7 @@ async function processDuel(event: any) {
         await sendChatMessage(`🏆 ${winnerName} wins the duel! ✨`);
       }
     } catch (chatErr) {
-      console.error("Chat message failed:", chatErr);
+      // Error already logged in sendChatMessage — no need to log again
     }
   }
 
@@ -295,7 +316,7 @@ async function handleDuelCommand(username: string) {
       );
     }
   } catch (err) {
-    console.error("!duel command failed:", err);
+    // Error already logged in sendChatMessage
   }
 }
 
@@ -423,7 +444,6 @@ export async function registerRoutes(
       await db.select({ count: sql<number>`count(*)` }).from(gameEvents);
       res.json({ status: "Backend is running!", db: "connected" });
     } catch (err) {
-      // Still return 200 so UptimeRobot doesn't alert on DB hiccups
       res.json({ status: "Backend is running!", db: "disconnected" });
     }
   });
