@@ -122,6 +122,8 @@ export function getTwitchAuthUrl(): string {
       "chat:read",
       "moderator:read:chatters",
       "user:read:chat",
+      "channel:read:redemptions",
+      "channel:manage:redemptions",
     ].join(" "),
   });
 
