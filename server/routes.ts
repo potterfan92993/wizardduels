@@ -8,6 +8,7 @@ import crypto from "crypto";
 import { SPELLS, resolveDuel } from "../shared/game-logic";
 import { log } from "./index";
 import { startChatBot } from "./chatbot";
+import { getChatToken, getTwitchAuthUrl, exchangeCodeForTokens } from "./auth";
 
 // ============ WEBSOCKET SETUP ============
 const clients = new Set<any>();
@@ -58,11 +59,14 @@ async function getAppAccessToken(): Promise<string> {
 }
 
 // Sends a single chat message with detailed error logging
+// Uses getChatToken() which auto-refreshes when needed
 async function sendChatMessage(message: string) {
+  const token = await getChatToken();
+
   const response = await fetch("https://api.twitch.tv/helix/chat/messages", {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${process.env.CHAT_TOKEN}`,
+      Authorization: `Bearer ${token}`,
       "Client-Id": process.env.TWITCH_CLIENT_ID!,
       "Content-Type": "application/json",
     },
@@ -77,11 +81,10 @@ async function sendChatMessage(message: string) {
     const errorData = await response.json();
     const status = response.status;
 
-    // Log specific actionable error messages
     if (status === 401) {
-      log(`❌ CHAT TOKEN EXPIRED — regenerate CHAT_TOKEN in Render env vars. Error: ${JSON.stringify(errorData)}`, "chat");
+      log(`❌ CHAT TOKEN EXPIRED — visit ${process.env.RENDER_EXTERNAL_URL}/auth/twitch to reauthorize. Error: ${JSON.stringify(errorData)}`, "chat");
     } else if (status === 403) {
-      log(`❌ CHAT TOKEN MISSING SCOPE — regenerate CHAT_TOKEN with correct scopes. Error: ${JSON.stringify(errorData)}`, "chat");
+      log(`❌ CHAT TOKEN MISSING SCOPE — visit ${process.env.RENDER_EXTERNAL_URL}/auth/twitch to reauthorize. Error: ${JSON.stringify(errorData)}`, "chat");
     } else if (status === 400) {
       log(`❌ CHAT BAD REQUEST — check BROADCASTER_ID env var. Error: ${JSON.stringify(errorData)}`, "chat");
     } else {
@@ -98,14 +101,15 @@ async function sendChatMessage(message: string) {
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // Fetches current chatters, excluding bots and the requesting user
-// Always includes the broadcaster as a potential opponent
 async function getChatters(excludeUsername: string): Promise<string[]> {
   try {
+    const token = await getChatToken();
+
     const response = await fetch(
       `https://api.twitch.tv/helix/chat/chatters?broadcaster_id=${process.env.BROADCASTER_ID}&moderator_id=${process.env.MODERATOR_ID}&first=20`,
       {
         headers: {
-          Authorization: `Bearer ${process.env.CHAT_TOKEN}`,
+          Authorization: `Bearer ${token}`,
           "Client-Id": process.env.TWITCH_CLIENT_ID!,
         },
       }
@@ -120,7 +124,6 @@ async function getChatters(excludeUsername: string): Promise<string[]> {
     const data = await response.json();
     const broadcasterUsername = (process.env.BROADCASTER_USERNAME || "").toLowerCase();
 
-    // Filter out the requester and known bots, cap at 7 to leave room for broadcaster
     let chatters: string[] = (data.data || [])
       .map((c: any) => c.user_login as string)
       .filter((name: string) =>
@@ -129,7 +132,6 @@ async function getChatters(excludeUsername: string): Promise<string[]> {
       )
       .slice(0, 7);
 
-    // Always include broadcaster at the top unless they're the one asking
     if (
       broadcasterUsername &&
       excludeUsername.toLowerCase() !== broadcasterUsername &&
@@ -158,7 +160,6 @@ async function ensureEventSubSubscription() {
       "Content-Type": "application/json",
     };
 
-    // Fetch all existing enabled subscriptions
     const checkRes = await fetch(
       "https://api.twitch.tv/helix/eventsub/subscriptions?status=enabled",
       { headers: appHeaders }
@@ -166,7 +167,6 @@ async function ensureEventSubSubscription() {
     const checkData = await checkRes.json();
     const existing = checkData.data || [];
 
-    // ---- Channel Points Redemption ----
     const hasRedemption = existing.some(
       (sub: any) =>
         sub.type === "channel.channel_points_custom_reward_redemption.add" &&
@@ -247,7 +247,6 @@ async function processDuel(event: any) {
 
   const duelMessage = `${casterName} used ${casterSpell.name} vs ${targetName}'s ${targetSpell.name}!`;
 
-  // Record to database
   await db.insert(gameEvents).values({
     caster_id: casterId,
     caster_name: casterName,
@@ -260,7 +259,6 @@ async function processDuel(event: any) {
     message: duelMessage,
   });
 
-  // Broadcast to WebSocket clients
   broadcast({
     type: "DUEL_RESULT",
     casterName,
@@ -275,27 +273,24 @@ async function processDuel(event: any) {
     message: duelMessage,
   });
 
-  // Send 3 sequential chat messages
-  if (process.env.CHAT_TOKEN) {
-    try {
-      await sendChatMessage(
-        `⚔️ ${casterName} has challenged ${targetName} to a Wizard Duel!`
-      );
-      await delay(1500);
+  try {
+    await sendChatMessage(
+      `⚔️ ${casterName} has challenged ${targetName} to a Wizard Duel!`
+    );
+    await delay(1500);
 
-      await sendChatMessage(
-        `🪄 ${casterName} cast ${casterSpell.name} and ${targetName} cast ${targetSpell.name}!`
-      );
-      await delay(1500);
+    await sendChatMessage(
+      `🪄 ${casterName} cast ${casterSpell.name} and ${targetName} cast ${targetSpell.name}!`
+    );
+    await delay(1500);
 
-      if (winnerName === "Draw") {
-        await sendChatMessage(`🤝 The duel ended in a Draw! Neither wizard prevails!`);
-      } else {
-        await sendChatMessage(`🏆 ${winnerName} wins the duel! ✨`);
-      }
-    } catch (chatErr) {
-      // Error already logged in sendChatMessage — no need to log again
+    if (winnerName === "Draw") {
+      await sendChatMessage(`🤝 The duel ended in a Draw! Neither wizard prevails!`);
+    } else {
+      await sendChatMessage(`🏆 ${winnerName} wins the duel! ✨`);
     }
+  } catch (chatErr) {
+    // Error already logged in sendChatMessage
   }
 
   log(`Duel recorded: ${casterName} vs ${targetName} → ${winnerName} wins`, "twitch");
@@ -338,6 +333,47 @@ export async function registerRoutes(
   // ============ START IRC CHATBOT FOR !duel COMMAND ============
   startChatBot(handleDuelCommand);
 
+  // ============ TWITCH OAUTH ROUTES ============
+
+  // Step 1 — Visit this URL to start authorization
+  app.get("/auth/twitch", (req, res) => {
+    const authUrl = getTwitchAuthUrl();
+    res.redirect(authUrl);
+  });
+
+  // Step 2 — Twitch redirects here after authorization
+  app.get("/auth/twitch/callback", async (req, res) => {
+    const code = req.query.code as string;
+    const error = req.query.error as string;
+
+    if (error) {
+      log(`OAuth error: ${error}`, "auth");
+      return res.status(400).send(`Authorization failed: ${error}`);
+    }
+
+    if (!code) {
+      return res.status(400).send("No authorization code received");
+    }
+
+    try {
+      await exchangeCodeForTokens(code);
+      log("✅ Twitch OAuth authorization complete — tokens saved to DB", "auth");
+      res.send(`
+        <html>
+          <body style="font-family: sans-serif; text-align: center; padding: 40px; background: #0a0a0a; color: #fff;">
+            <h1>✅ Authorization Complete!</h1>
+            <p>Wizard Duels is now authorized to send chat messages.</p>
+            <p>Tokens are saved and will auto-refresh — you never need to do this again!</p>
+            <p style="color: #888;">You can close this tab.</p>
+          </body>
+        </html>
+      `);
+    } catch (err) {
+      log(`OAuth callback error: ${err}`, "auth");
+      res.status(500).send(`Authorization failed: ${err}`);
+    }
+  });
+
   // ============ TWITCH WEBHOOK ============
   app.post("/api/twitch/webhook", async (req, res) => {
     if (!verifyTwitchSignature(req)) {
@@ -349,16 +385,13 @@ export async function registerRoutes(
     const messageType = req.headers["twitch-eventsub-message-type"] as string;
     const subscriptionType = req.body.subscription?.type;
 
-    // DEBUG: Log every incoming webhook
     log(`Webhook received: type=${messageType} sub=${subscriptionType} id=${messageId} reward="${req.body.event?.reward?.title}"`, "twitch");
 
-    // Handle Twitch verification challenge
     if (messageType === "webhook_callback_verification") {
       log("Twitch webhook verified successfully", "twitch");
       return res.status(200).send(req.body.challenge);
     }
 
-    // Deduplicate — ignore already processed messages
     if (processedMessageIds.has(messageId)) {
       log(`Duplicate message ignored: ${messageId}`, "twitch");
       return res.status(204).send();
@@ -366,13 +399,11 @@ export async function registerRoutes(
     processedMessageIds.add(messageId);
     setTimeout(() => processedMessageIds.delete(messageId), 10 * 60 * 1000);
 
-    // Respond to Twitch immediately to prevent retries
     res.status(204).send();
 
     if (messageType === "notification") {
       const event = req.body.event;
 
-      // ---- Channel Points Redemption → Run Duel ----
       if (
         subscriptionType === "channel.channel_points_custom_reward_redemption.add" &&
         event.reward?.title === "Wizard Duel!"
@@ -387,7 +418,7 @@ export async function registerRoutes(
     }
   });
 
-  // ============ LEADERBOARD (top 10 winners) ============
+  // ============ LEADERBOARD ============
   app.get("/api/leaderboard", async (req, res) => {
     try {
       const result = await db
@@ -408,7 +439,7 @@ export async function registerRoutes(
     }
   });
 
-  // ============ RECENT EVENTS (last 10 duels) ============
+  // ============ RECENT EVENTS ============
   app.get("/api/events/recent", async (req, res) => {
     try {
       const result = await db
@@ -438,7 +469,6 @@ export async function registerRoutes(
   });
 
   // ============ HEALTH CHECK ============
-  // Queries the DB so UptimeRobot pings keep Supabase active
   app.get("/api/health", async (req, res) => {
     try {
       await db.select({ count: sql<number>`count(*)` }).from(gameEvents);
