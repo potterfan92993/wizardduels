@@ -148,56 +148,82 @@ async function getChatters(excludeUsername: string): Promise<string[]> {
 }
 
 // Automatically registers EventSub subscription on startup
+// FIX: queries by type (not status), handles pending_verification, auto-deletes duplicates
 async function ensureEventSubSubscription() {
   try {
-    log("Checking Twitch EventSub subscriptions...", "twitch");
-
     const token = await getAppAccessToken();
+    const callbackUrl = `${process.env.RENDER_EXTERNAL_URL}/api/twitch/webhook`;
 
-    const appHeaders = {
-      "Client-ID": process.env.TWITCH_CLIENT_ID!,
-      "Authorization": `Bearer ${token}`,
-      "Content-Type": "application/json",
-    };
-
-    const checkRes = await fetch(
-      "https://api.twitch.tv/helix/eventsub/subscriptions?status=enabled",
-      { headers: appHeaders }
-    );
-    const checkData = await checkRes.json();
-    const existing = checkData.data || [];
-
-    const hasRedemption = existing.some(
-      (sub: any) =>
-        sub.type === "channel.channel_points_custom_reward_redemption.add" &&
-        sub.condition?.broadcaster_user_id === process.env.BROADCASTER_ID &&
-        sub.transport?.callback === `${process.env.RENDER_EXTERNAL_URL}/api/twitch/webhook`
-    );
-
-    if (hasRedemption) {
-      log("Channel points subscription already active", "twitch");
-    } else {
-      log("Registering channel points subscription...", "twitch");
-      const res = await fetch("https://api.twitch.tv/helix/eventsub/subscriptions", {
-        method: "POST",
-        headers: appHeaders,
-        body: JSON.stringify({
-          type: "channel.channel_points_custom_reward_redemption.add",
-          version: "1",
-          condition: { broadcaster_user_id: process.env.BROADCASTER_ID },
-          transport: {
-            method: "webhook",
-            callback: `${process.env.RENDER_EXTERNAL_URL}/api/twitch/webhook`,
-            secret: process.env.TWITCH_WEBHOOK_SECRET,
-          },
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        log(`Channel points subscription failed: ${JSON.stringify(data)}`, "twitch");
-      } else {
-        log(`Channel points subscription registered (id: ${data.data?.[0]?.id})`, "twitch");
+    // FIX: fetch ALL subscriptions for this type regardless of status
+    const listRes = await fetch(
+      `https://api.twitch.tv/helix/eventsub/subscriptions?type=channel.channel_points_custom_reward_redemption.add`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Client-Id": process.env.TWITCH_CLIENT_ID!,
+        },
       }
+    );
+    const listData = await listRes.json();
+    const allSubs: any[] = listData.data || [];
+
+    // Only consider subscriptions pointing at OUR callback URL
+    const ourSubs = allSubs.filter((s) => s.transport?.callback === callbackUrl);
+
+    if (ourSubs.length > 1) {
+      // Keep the first (oldest), delete duplicates
+      const toDelete = ourSubs.slice(1);
+      for (const sub of toDelete) {
+        await fetch(
+          `https://api.twitch.tv/helix/eventsub/subscriptions?id=${sub.id}`,
+          {
+            method: "DELETE",
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Client-Id": process.env.TWITCH_CLIENT_ID!,
+            },
+          }
+        );
+        log(`[eventsub] Deleted duplicate subscription ${sub.id} (status was: ${sub.status})`, "twitch");
+      }
+      log(`[eventsub] Kept subscription ${ourSubs[0].id} — duplicates cleaned up`, "twitch");
+      return;
+    }
+
+    // FIX: accept both 'enabled' and 'webhook_callback_verification_pending'
+    const activeStatuses = ["enabled", "webhook_callback_verification_pending"];
+    const alreadyActive = ourSubs.some((s) => activeStatuses.includes(s.status));
+
+    if (alreadyActive) {
+      log(`Channel points subscription already active (${ourSubs[0]?.id})`, "twitch");
+      return;
+    }
+
+    // No active subscription found — create one
+    log("Registering channel points subscription...", "twitch");
+    const res = await fetch("https://api.twitch.tv/helix/eventsub/subscriptions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Client-Id": process.env.TWITCH_CLIENT_ID!,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        type: "channel.channel_points_custom_reward_redemption.add",
+        version: "1",
+        condition: { broadcaster_user_id: process.env.BROADCASTER_ID },
+        transport: {
+          method: "webhook",
+          callback: callbackUrl,
+          secret: process.env.TWITCH_WEBHOOK_SECRET,
+        },
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      log(`Channel points subscription failed: ${JSON.stringify(data)}`, "twitch");
+    } else {
+      log(`Channel points subscription registered (id: ${data.data?.[0]?.id})`, "twitch");
     }
   } catch (err) {
     log(`EventSub setup error: ${err}`, "twitch");
