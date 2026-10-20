@@ -23,6 +23,12 @@ function broadcast(data: object) {
 // Store recently processed message IDs to prevent duplicate processing
 const processedMessageIds = new Set<string>();
 
+// Store recently processed REDEMPTION IDs.
+// Unlike message IDs (unique per subscription delivery), redemption IDs are
+// the same when two active EventSub subscriptions both deliver the same event.
+// This is the definitive guard against double-duels from duplicate subscriptions.
+const processedRedemptionIds = new Set<string>();
+
 // Known bots to exclude from duel targets
 const BOT_BLOCKLIST = new Set([
   "streamelements",
@@ -440,6 +446,17 @@ export async function registerRoutes(
         subscriptionType === "channel.channel_points_custom_reward_redemption.add" &&
         event.reward?.title === "Wizard Duel!"
       ) {
+        // Deduplicate by redemption ID — this is the same value regardless of
+        // which subscription delivered it, so it catches doubles from duplicate
+        // EventSub subscriptions even after startup cleanup has finished.
+        const redemptionId: string = event.id;
+        if (processedRedemptionIds.has(redemptionId)) {
+          log(`Duplicate redemption ignored (id: ${redemptionId}) — fired by a duplicate EventSub subscription`, "twitch");
+          return;
+        }
+        processedRedemptionIds.add(redemptionId);
+        setTimeout(() => processedRedemptionIds.delete(redemptionId), 10 * 60 * 1000);
+
         if (!eventSubCleanupDone) {
           // Cleanup not yet complete — a duplicate sub may still be active.
           // Acknowledge to Twitch (already sent 204) but skip the duel.
