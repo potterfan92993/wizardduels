@@ -147,14 +147,14 @@ async function getChatters(excludeUsername: string): Promise<string[]> {
   }
 }
 
-// Automatically registers EventSub subscription on startup
-// FIX: queries by type (not status), handles pending_verification, auto-deletes duplicates
+// Checks all EventSub subscriptions for this event type, deletes duplicates,
+// creates a new one only if none exist. Returns once complete.
 async function ensureEventSubSubscription() {
   try {
     const token = await getAppAccessToken();
     const callbackUrl = `${process.env.RENDER_EXTERNAL_URL}/api/twitch/webhook`;
 
-    // FIX: fetch ALL subscriptions for this type regardless of status
+    // Fetch ALL subscriptions for this type regardless of status
     const listRes = await fetch(
       `https://api.twitch.tv/helix/eventsub/subscriptions?type=channel.channel_points_custom_reward_redemption.add`,
       {
@@ -184,13 +184,13 @@ async function ensureEventSubSubscription() {
             },
           }
         );
-        log(`[eventsub] Deleted duplicate subscription ${sub.id} (status was: ${sub.status})`, "twitch");
+        log(`[eventsub] Deleted duplicate subscription ${sub.id} (status: ${sub.status})`, "twitch");
       }
       log(`[eventsub] Kept subscription ${ourSubs[0].id} — duplicates cleaned up`, "twitch");
       return;
     }
 
-    // FIX: accept both 'enabled' and 'webhook_callback_verification_pending'
+    // Accept both 'enabled' and 'webhook_callback_verification_pending'
     const activeStatuses = ["enabled", "webhook_callback_verification_pending"];
     const alreadyActive = ourSubs.some((s) => activeStatuses.includes(s.status));
 
@@ -353,9 +353,6 @@ export async function registerRoutes(
     ws.on("close", () => clients.delete(ws));
   });
 
-  // ============ AUTO-REGISTER EVENTSUB ON STARTUP ============
-  setTimeout(ensureEventSubSubscription, 3000);
-
   // ============ START IRC CHATBOT FOR !duel COMMAND ============
   startChatBot(handleDuelCommand);
 
@@ -401,6 +398,15 @@ export async function registerRoutes(
   });
 
   // ============ TWITCH WEBHOOK ============
+  // Register webhook route FIRST so Twitch can verify new subscriptions
+  // created by ensureEventSubSubscription below.
+  //
+  // eventSubCleanupDone gates duel processing: if cleanup hasn't finished yet
+  // (i.e. a duplicate subscription might still be active), we acknowledge the
+  // webhook to Twitch (204) but skip the duel. This prevents the double-fire
+  // race window that existed when cleanup ran on a 3-second delay.
+  let eventSubCleanupDone = false;
+
   app.post("/api/twitch/webhook", async (req, res) => {
     if (!verifyTwitchSignature(req)) {
       log("Webhook signature verification failed", "twitch");
@@ -434,6 +440,12 @@ export async function registerRoutes(
         subscriptionType === "channel.channel_points_custom_reward_redemption.add" &&
         event.reward?.title === "Wizard Duel!"
       ) {
+        if (!eventSubCleanupDone) {
+          // Cleanup not yet complete — a duplicate sub may still be active.
+          // Acknowledge to Twitch (already sent 204) but skip the duel.
+          log(`Duel from ${event.user_name} held — waiting for EventSub cleanup`, "twitch");
+          return;
+        }
         log(`Duel triggered by ${event.user_name} targeting "${event.user_input}"`, "twitch");
         processDuel(event).catch((err) =>
           console.error("Duel processing error:", err)
@@ -443,6 +455,20 @@ export async function registerRoutes(
       }
     }
   });
+
+  // ============ AUTO-REGISTER EVENTSUB ON STARTUP ============
+  // No setTimeout delay — webhook route is already registered above so Twitch
+  // can verify subscriptions immediately. Cleanup runs now and sets the flag
+  // when done, unblocking duel processing.
+  ensureEventSubSubscription()
+    .then(() => {
+      eventSubCleanupDone = true;
+      log("[eventsub] Cleanup complete — duel processing enabled", "twitch");
+    })
+    .catch((err) => {
+      log(`[eventsub] Cleanup failed: ${err} — enabling duels anyway`, "twitch");
+      eventSubCleanupDone = true; // don't block duels forever on error
+    });
 
   // ============ LEADERBOARD ============
   app.get("/api/leaderboard", async (req, res) => {
